@@ -332,11 +332,15 @@ console.log(data.name, data.skills);
     "summary": "Experienced backend engineer with 3+ years building scalable APIs and distributed systems.",
     "resume_score": {
       "overall": 84,
-      "content": 90,
-      "experience_relevance": 85,
-      "skills_match": 88,
-      "education": 75,
-      "remarks": "Well-structured resume with good coverage across all sections."
+      "contact_information": 9,
+      "professional_summary": 8,
+      "work_experience": 8,
+      "skills": 8,
+      "education_certifications": 8,
+      "achievements_projects": 7,
+      "format_design": 8,
+      "grade": "Good",
+      "remarks": "Good resume — address the minor gaps above to reach Excellent."
     }
   }
 }
@@ -615,15 +619,31 @@ SalesforceResumeData
 └── resume_score            ResumeScore     (same as generic, for reference — not a SCSCHAMPS field)
 ```
 
-### `ResumeScore` — scoring logic
+### `ResumeScore` — 7-category weighted scoring matrix
 
-| Field | Weight | What it measures |
+Each category is scored **0–10** by the rule-based engine, then multiplied by its weight to produce `overall` (out of 100).
+
+| Field | Raw score (0–10) | Weight | Evaluation criteria |
+|---|---|---|---|
+| `contact_information` | 0–10 | **5%** | Name, email, phone, location completeness |
+| `professional_summary` | 0–10 | **15%** | Summary presence, length, clarity |
+| `work_experience` | 0–10 | **25%** | Number of roles, descriptions, dates |
+| `skills` | 0–10 | **20%** | Skill count, breadth (hard + soft) |
+| `education_certifications` | 0–10 | **10%** | Degree, field, year, grade + cert count |
+| `achievements_projects` | 0–10 | **15%** | Projects with descriptions + awards |
+| `format_design` | 0–10 | **10%** | Section coverage, data completeness |
+| `overall` | 0–100 | — | Σ (raw × weight × 10) |
+| `grade` | string | — | Interpretation band (see below) |
+| `remarks` | string | — | Human-readable improvement suggestions |
+
+**Interpretation bands:**
+
+| Score | Grade | Meaning |
 |---|---|---|
-| `content` | 20% | Completeness of contact info + summary presence |
-| `skills_match` | 25% | Number of skills listed (0 → 0, 20+ → 100) |
-| `experience_relevance` | 30% | Number of roles + presence of descriptions + bonus for certs/projects |
-| `education` | 25% | Degree name, field of study, year, grade presence |
-| `overall` | — | Weighted average of the above four |
+| 90–100 | **Excellent** | Professional-ready resume |
+| 75–89 | **Good** | Needs minor improvements |
+| 50–74 | **Average** | Needs improvement |
+| < 50 | **Poor** | Needs major overhaul |
 
 ---
 

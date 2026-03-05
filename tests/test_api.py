@@ -56,12 +56,16 @@ MOCK_PARSED_RESULT = {
     "awards": [],
     "summary": "Experienced software engineer with 3 years in Python and cloud.",
     "resume_score": {
-        "overall": 82,
-        "content": 85,
-        "experience_relevance": 80,
-        "skills_match": 90,
-        "education": 75,
-        "remarks": "Well-structured resume.",
+        "overall": 74,
+        "contact_information": 9,
+        "professional_summary": 7,
+        "work_experience": 5,
+        "skills": 6,
+        "education_certifications": 8,
+        "achievements_projects": 2,
+        "format_design": 8,
+        "grade": "Average",
+        "remarks": "Good resume — address the minor gaps above to reach Excellent.",
     },
 }
 
@@ -315,8 +319,12 @@ class TestSalesforceMapping:
             "current_location": None, "skills": [], "experience": [],
             "education": [], "projects": [], "certifications": [],
             "awards": [], "summary": None,
-            "resume_score": {"overall": 0, "content": 0, "experience_relevance": 0,
-                             "skills_match": 0, "education": 0, "remarks": None},
+            "resume_score": {
+                "overall": 0, "contact_information": 0, "professional_summary": 0,
+                "work_experience": 0, "skills": 0, "education_certifications": 0,
+                "achievements_projects": 0, "format_design": 0,
+                "grade": "Poor", "remarks": None,
+            },
         }
         sf = map_to_salesforce(empty)
         assert sf.Phone is None
@@ -336,26 +344,56 @@ class TestScoreComputation:
             "contact": {"name": "Jane", "email": "jane@example.com", "phone": "123", "current_location": "Mumbai"},
             "skills": {"skills": ["Python", "Django", "Docker", "AWS", "SQL", "React", "Go", "Rust", "Java", "Kubernetes"]},
             "experience": {"experience": [
-                {"company": "A", "title": "SWE", "duration": "2020-2023", "description": "Built APIs"},
-                {"company": "B", "title": "Lead", "duration": "2023-2025", "description": "Led team"},
+                {"company": "A", "title": "SWE", "duration": "2020-2023", "description": "Built APIs successfully"},
+                {"company": "B", "title": "Lead", "duration": "2023-2025", "description": "Led engineering team"},
             ]},
             "education": {"education": [{"institution": "IIT", "degree": "B.Tech", "field_of_study": "CS", "year": "2020", "grade": "9.0"}]},
             "certifications": {"certifications": [{"name": "AWS", "issuer": "Amazon"}]},
-            "projects": {"projects": []},
-            "summary": {"summary": "Senior engineer."},
+            "projects": {"projects": [{"name": "P1", "duration": "2023", "description": "Built a scalable system"}]},
+            "awards": {"awards": []},
+            "summary": {"summary": "Senior engineer with 5 years experience building scalable cloud systems."},
         }
         score = _compute_score(parsed)
-        assert score["overall"] >= 70
-        assert score["content"] >= 70
-        assert score["skills_match"] >= 75
+        assert score["overall"] >= 60
+        assert score["contact_information"] >= 6
+        assert score["skills"] >= 6
+        assert score["grade"] in ("Excellent", "Good", "Average")
 
     def test_compute_score_empty_resume(self):
         from app.services.llm import _compute_score
 
         parsed = {
             "contact": {}, "skills": {}, "experience": {},
-            "education": {}, "certifications": {}, "projects": {}, "summary": {},
+            "education": {}, "certifications": {}, "projects": {}, "awards": {}, "summary": {},
         }
         score = _compute_score(parsed)
-        assert score["overall"] == 0
-        assert "No skills" in score["remarks"] or "No work experience" in score["remarks"] or "Missing" in score["remarks"]
+        assert score["overall"] < 20
+        assert score["grade"] == "Poor"
+        assert score["contact_information"] == 0
+        assert score["work_experience"] == 0
+        assert score["skills"] == 0
+
+    def test_score_matrix_weights(self):
+        """Verify weighted formula: sum of (raw * weight * 10) = overall."""
+        from app.services.llm import _compute_score
+
+        parsed = {
+            "contact": {"name": "X", "email": "x@x.com", "phone": "999"},
+            "skills": {"skills": ["Python", "SQL", "Docker", "AWS", "Go", "React", "Java", "Rust"]},
+            "experience": {"experience": [
+                {"company": "C", "title": "Dev", "duration": "2020-2024", "description": "Worked on backend systems"}
+            ]},
+            "education": {"education": [{"institution": "Uni", "degree": "BSc", "field_of_study": "CS", "year": "2020", "grade": None}]},
+            "certifications": {"certifications": []},
+            "projects": {"projects": []},
+            "awards": {"awards": []},
+            "summary": {"summary": "Software developer with 4 years of experience in Python and cloud technologies."},
+        }
+        score = _compute_score(parsed)
+        # All 7 category keys must be present
+        for key in ("contact_information", "professional_summary", "work_experience",
+                    "skills", "education_certifications", "achievements_projects", "format_design"):
+            assert key in score, f"Missing key: {key}"
+            assert 0 <= score[key] <= 10, f"{key} out of range: {score[key]}"
+        assert 0 <= score["overall"] <= 100
+        assert score["grade"] in ("Excellent", "Good", "Average", "Poor")

@@ -34,11 +34,20 @@ class Award(BaseModel):
 
 
 class ResumeScore(BaseModel):
-    overall: int = Field(0, ge=0, le=100, description="Overall resume score out of 100")
-    content: int = Field(0, ge=0, le=100, description="Content quality score")
-    experience_relevance: int = Field(0, ge=0, le=100, description="Experience relevance score")
-    skills_match: int = Field(0, ge=0, le=100, description="Skills presentation score")
-    education: int = Field(0, ge=0, le=100, description="Education quality score")
+    # ── 7-category weighted score matrix (each raw score 0–10, weighted to 100) ──
+    overall: int = Field(0, ge=0, le=100, description="Overall weighted score out of 100")
+
+    # Individual category raw scores (0–10)
+    contact_information: int = Field(0, ge=0, le=10, description="Contact info completeness (weight 5%)")
+    professional_summary: int = Field(0, ge=0, le=10, description="Summary clarity and strength (weight 15%)")
+    work_experience: int = Field(0, ge=0, le=10, description="Experience structure and impact (weight 25%)")
+    skills: int = Field(0, ge=0, le=10, description="Skills relevance and categorization (weight 20%)")
+    education_certifications: int = Field(0, ge=0, le=10, description="Education and certifications (weight 10%)")
+    achievements_projects: int = Field(0, ge=0, le=10, description="Projects, awards, measurable results (weight 15%)")
+    format_design: int = Field(0, ge=0, le=10, description="Layout, readability, formatting (weight 10%)")
+
+    # Interpretation band
+    grade: str = Field("Poor", description="Excellent / Good / Average / Poor")
     remarks: str | None = None
 
 

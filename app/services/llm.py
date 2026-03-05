@@ -225,109 +225,202 @@ def _extract_json(raw: str) -> dict:
 
 
 def _compute_score(parsed: dict) -> dict:
-    """Compute resume score based on actual extracted data."""
-    contact = parsed.get("contact", {})
-    skills = parsed.get("skills", {}).get("skills", [])
-    experience = parsed.get("experience", {}).get("experience", [])
-    education = parsed.get("education", {}).get("education", [])
-    certifications = parsed.get("certifications", {}).get("certifications", [])
-    projects = parsed.get("projects", {}).get("projects", [])
-    summary = parsed.get("summary", {}).get("summary", "")
+    """
+    Compute resume score using the 7-category weighted matrix.
+
+    Score matrix (each category scored 0–10, then weighted):
+    ┌─────────────────────────────┬────────┬──────────────────────────────────────────┐
+    │ Category                    │ Weight │ Evaluation Criteria                      │
+    ├─────────────────────────────┼────────┼──────────────────────────────────────────┤
+    │ Contact Information         │  5%    │ Name, email, phone, LinkedIn, portfolio  │
+    │ Professional Summary        │ 15%    │ Clear, concise, highlights strengths      │
+    │ Work Experience             │ 25%    │ Structured, achievements, measurable KPIs │
+    │ Skills                      │ 20%    │ Relevant, categorized, hard + soft skills │
+    │ Education & Certifications  │ 10%    │ Complete, formatted, relevant certs       │
+    │ Achievements / Projects     │ 15%    │ Projects, awards, quantifiable results    │
+    │ Format & Design             │ 10%    │ Clean layout, readable, no typos          │
+    └─────────────────────────────┴────────┴──────────────────────────────────────────┘
+
+    Interpretation:
+      90–100 → Excellent / Professional-ready
+      75–89  → Good / Needs minor improvements
+      50–74  → Average / Needs improvement
+      <50    → Poor / Needs major overhaul
+    """
+    contact      = parsed.get("contact", {})
+    skills       = parsed.get("skills", {}).get("skills", [])
+    experience   = parsed.get("experience", {}).get("experience", [])
+    education    = parsed.get("education", {}).get("education", [])
+    certs        = parsed.get("certifications", {}).get("certifications", [])
+    projects     = parsed.get("projects", {}).get("projects", [])
+    awards       = parsed.get("awards", {}).get("awards", [])
+    summary      = parsed.get("summary", {}).get("summary", "") or ""
 
     remarks = []
 
-    # Content score (0-100): completeness of contact info + summary
-    content = 0
-    if contact.get("name"):
-        content += 20
-    if contact.get("email"):
-        content += 20
-    if contact.get("phone") or contact.get("number"):
-        content += 15
-    if contact.get("current_location"):
-        content += 15
+    # ── 1. Contact Information (weight 5%) — score 0–10 ──────────────────────
+    contact_score = 0
+    if contact.get("name"):         contact_score += 3
+    if contact.get("email"):        contact_score += 3
+    if contact.get("phone") or contact.get("number"): contact_score += 2
+    if contact.get("current_location"): contact_score += 1
+    # LinkedIn / portfolio would be +1 but not extracted yet — max achievable is 9→10
+    contact_score = min(10, contact_score + (1 if contact_score >= 9 else 0))
+    if contact_score < 5:
+        remarks.append("Contact information is incomplete — add name, email, and phone.")
+
+    # ── 2. Professional Summary (weight 15%) — score 0–10 ────────────────────
+    summary_score = 0
     if summary:
-        content += 30
-    if content < 60:
-        remarks.append("Missing basic contact information or summary.")
-
-    # Skills score (0-100): based on number of skills
-    skill_count = len(skills)
-    if skill_count == 0:
-        skills_score = 0
-        remarks.append("No skills listed.")
-    elif skill_count <= 3:
-        skills_score = 30
-        remarks.append("Very few skills listed.")
-    elif skill_count <= 7:
-        skills_score = 55
-    elif skill_count <= 12:
-        skills_score = 75
-    elif skill_count <= 20:
-        skills_score = 90
+        words = len(summary.split())
+        if words >= 30:   summary_score = 10   # rich, detailed
+        elif words >= 15: summary_score = 7    # decent
+        elif words >= 5:  summary_score = 4    # too brief
+        else:             summary_score = 2
     else:
-        skills_score = 100
+        remarks.append("No professional summary found — add a concise 2–3 sentence summary.")
 
-    # Experience score (0-100): number of roles + descriptions
+    # ── 3. Work Experience (weight 25%) — score 0–10 ─────────────────────────
     exp_count = len(experience)
+    has_desc  = sum(1 for e in experience if e.get("description") and len(e["description"]) > 20)
+    has_dates = sum(1 for e in experience if e.get("duration"))
+
     if exp_count == 0:
         exp_score = 0
         remarks.append("No work experience found.")
     elif exp_count == 1:
-        exp_score = 45
+        exp_score = 4
     elif exp_count == 2:
-        exp_score = 65
+        exp_score = 6
     elif exp_count <= 4:
-        exp_score = 80
+        exp_score = 8
     else:
-        exp_score = 95
-    # Bonus for having descriptions
-    has_desc = sum(1 for e in experience if e.get("description"))
-    if exp_count > 0 and has_desc == exp_count:
-        exp_score = min(100, exp_score + 5)
+        exp_score = 9
 
-    # Education score (0-100)
-    edu_count = len(education)
-    if edu_count == 0:
-        edu_score = 0
+    # Bonus: descriptions present (+1), dates present (+1)
+    if exp_count > 0:
+        if has_desc == exp_count:  exp_score = min(10, exp_score + 1)
+        if has_dates == exp_count: exp_score = min(10, exp_score + 0)  # already counted in base
+
+    if exp_count > 0 and has_desc < exp_count:
+        remarks.append("Add measurable impact and descriptions to work experience entries.")
+
+    # ── 4. Skills (weight 20%) — score 0–10 ──────────────────────────────────
+    skill_count = len(skills)
+    if skill_count == 0:
+        skills_score = 0
+        remarks.append("No skills listed — add both technical and soft skills.")
+    elif skill_count <= 3:
+        skills_score = 2
+        remarks.append("Very few skills listed — aim for at least 8–10 relevant skills.")
+    elif skill_count <= 6:
+        skills_score = 4
+    elif skill_count <= 10:
+        skills_score = 6
+    elif skill_count <= 15:
+        skills_score = 8
+    elif skill_count <= 20:
+        skills_score = 9
+    else:
+        skills_score = 10
+
+    # ── 5. Education & Certifications (weight 10%) — score 0–10 ──────────────
+    edu_score = 0
+    if education:
+        edu = education[0]
+        if edu.get("institution"):   edu_score += 2
+        if edu.get("degree"):        edu_score += 2
+        if edu.get("field_of_study"): edu_score += 1
+        if edu.get("year"):          edu_score += 1
+        if edu.get("grade"):         edu_score += 1
+    else:
         remarks.append("No education details found.")
+
+    # Certifications boost (up to +3)
+    cert_boost = min(3, len(certs))
+    edu_score  = min(10, edu_score + cert_boost)
+
+    if not education:
+        edu_score = 0
+
+    # ── 6. Achievements / Projects (weight 15%) — score 0–10 ─────────────────
+    achieve_score = 0
+    project_count = len(projects)
+    award_count   = len(awards)
+
+    if project_count == 0 and award_count == 0:
+        achieve_score = 0
+        remarks.append("No projects or achievements found — add notable projects or awards.")
     else:
-        edu_score = 40
-        edu = education[0]  # primary education
-        if edu.get("degree"):
-            edu_score += 20
-        if edu.get("field_of_study"):
-            edu_score += 15
-        if edu.get("year"):
-            edu_score += 10
-        if edu.get("grade"):
-            edu_score += 15
+        # Projects: up to 6 points
+        if project_count >= 3:   achieve_score += 6
+        elif project_count == 2: achieve_score += 4
+        elif project_count == 1: achieve_score += 2
 
-    # Bonus for certifications and projects
-    if certifications:
-        exp_score = min(100, exp_score + len(certifications) * 3)
-        skills_score = min(100, skills_score + len(certifications) * 2)
-    if projects:
-        exp_score = min(100, exp_score + len(projects) * 3)
+        # Projects with descriptions: +1
+        proj_with_desc = sum(1 for p in projects if p.get("description") and len(p["description"]) > 10)
+        if proj_with_desc == project_count and project_count > 0:
+            achieve_score = min(10, achieve_score + 1)
 
-    # Overall = weighted average
+        # Awards: up to 3 points
+        if award_count >= 2:     achieve_score = min(10, achieve_score + 3)
+        elif award_count == 1:   achieve_score = min(10, achieve_score + 2)
+
+    # ── 7. Format & Design (weight 10%) — score 0–10 ─────────────────────────
+    # Inferred from data completeness — cannot visually inspect the PDF from here
+    # Scored based on: sections present, data populated, no null overload
+    populated_sections = sum([
+        bool(contact.get("name")),
+        bool(summary),
+        bool(experience),
+        bool(skills),
+        bool(education),
+        bool(projects or awards),
+        bool(certs),
+    ])
+    format_score = min(10, populated_sections + 3)  # base 3 for passing file validation
+
+    # ── Weighted overall (each raw score × weight → sum out of 100) ──────────
     overall = round(
-        content * 0.20
-        + skills_score * 0.25
-        + exp_score * 0.30
-        + edu_score * 0.25
+        contact_score   * 0.05 * 10
+        + summary_score * 0.15 * 10
+        + exp_score     * 0.25 * 10
+        + skills_score  * 0.20 * 10
+        + edu_score     * 0.10 * 10
+        + achieve_score * 0.15 * 10
+        + format_score  * 0.10 * 10
     )
+    overall = min(100, overall)
 
-    if not remarks:
-        remarks.append("Well-structured resume with good coverage across all sections.")
+    # ── Interpretation band ───────────────────────────────────────────────────
+    if overall >= 90:
+        grade = "Excellent"
+        if not remarks:
+            remarks.append("Professional-ready resume with strong coverage across all sections.")
+    elif overall >= 75:
+        grade = "Good"
+        if not remarks:
+            remarks.append("Good resume — address the minor gaps above to reach Excellent.")
+    elif overall >= 50:
+        grade = "Average"
+        if not remarks:
+            remarks.append("Resume needs improvement in several areas — see remarks above.")
+    else:
+        grade = "Poor"
+        if not remarks:
+            remarks.append("Resume needs a major overhaul — many critical sections are missing.")
 
     return {
-        "overall": min(100, overall),
-        "content": min(100, content),
-        "experience_relevance": min(100, exp_score),
-        "skills_match": min(100, skills_score),
-        "education": min(100, edu_score),
-        "remarks": " ".join(remarks),
+        "overall":                 overall,
+        "contact_information":     contact_score,
+        "professional_summary":    summary_score,
+        "work_experience":         exp_score,
+        "skills":                  skills_score,
+        "education_certifications": edu_score,
+        "achievements_projects":   achieve_score,
+        "format_design":           format_score,
+        "grade":                   grade,
+        "remarks":                 " ".join(remarks),
     }
 
 

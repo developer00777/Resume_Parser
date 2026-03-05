@@ -12,7 +12,7 @@ Both modes are available simultaneously on the same running server.
 
 - **Framework:** FastAPI 0.115.0 + Uvicorn 0.32.0
 - **Language:** Python 3.11
-- **LLM:** Ollama (local) — default model `qwen2.5:3b`
+- **LLM:** Ollama (local) — model `llama3.2:3b`
 - **PDF Parsing:** PyPDF 5.1.0
 - **DOCX Parsing:** python-docx 1.1.2
 - **HTTP Client:** httpx 0.27.2 (async)
@@ -100,7 +100,7 @@ All env vars — see `.env.example` for full list.
 
 | Variable | Default | Description |
 |---|---|---|
-| `OLLAMA_MODEL` | `qwen2.5:3b` | LLM model |
+| `OLLAMA_MODEL` | `llama3.2:3b` | LLM model |
 | `OLLAMA_HOST` | `http://ollama:11434` | Ollama endpoint |
 | `API_KEY` | `changeme` | X-API-Key value |
 | `MAX_FILE_SIZE` | `10485760` | Upload limit (bytes) |
@@ -144,3 +144,4 @@ Pipeline: `lint → test → docker-build`
 - **Graceful degradation:** Empty fields returned on LLM extraction failure (no crash)
 - **Auth middleware:** `X-API-Key` on all `/api/v1/*`; public: `/health`, `/docs`, `/redoc`
 - **LLM:** temperature=0.1, 8 specialized prompts, regex section-splitting before LLM
+- **Score matrix:** 7-category weighted system (contact 5%, summary 15%, experience 25%, skills 20%, education+certs 10%, achievements 15%, format 10%) — each raw 0–10, overall 0–100 with grade band (Excellent/Good/Average/Poor)
