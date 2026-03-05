@@ -4,7 +4,7 @@ from pydantic_settings import BaseSettings
 class Settings(BaseSettings):
     # ── Ollama ────────────────────────────────────────────────────────────────
     ollama_host: str = "http://ollama:11434"
-    ollama_model: str = "qwen2.5:3b"
+    ollama_model: str = "llama3.2:3b"
 
     # ── Application ───────────────────────────────────────────────────────────
     api_key: str = "changeme"

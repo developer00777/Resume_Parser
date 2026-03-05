@@ -140,8 +140,8 @@ class TestParseEndpoint:
 
     def test_parse_returns_200_with_mocked_llm(self):
         with (
-            patch("app.services.document.extract_text", new_callable=AsyncMock) as mock_ext,
-            patch("app.services.llm.parse_resume", new_callable=AsyncMock) as mock_llm,
+            patch("app.routes.parser.extract_text", new_callable=AsyncMock) as mock_ext,
+            patch("app.routes.parser.parse_resume", new_callable=AsyncMock) as mock_llm,
         ):
             mock_ext.return_value = "Jane Doe\njane@example.com\nPython, FastAPI"
             mock_llm.return_value = MOCK_PARSED_RESULT
@@ -172,8 +172,8 @@ class TestParseEndpoint:
 
     def test_parse_docx_accepted(self):
         with (
-            patch("app.services.document.extract_text", new_callable=AsyncMock) as mock_ext,
-            patch("app.services.llm.parse_resume", new_callable=AsyncMock) as mock_llm,
+            patch("app.routes.parser.extract_text", new_callable=AsyncMock) as mock_ext,
+            patch("app.routes.parser.parse_resume", new_callable=AsyncMock) as mock_llm,
         ):
             mock_ext.return_value = "Resume text"
             mock_llm.return_value = MOCK_PARSED_RESULT
@@ -197,15 +197,15 @@ class TestParseEndpoint:
 
 class TestModelsEndpoint:
     def test_models_returns_list(self):
-        with patch("app.services.llm.list_models", new_callable=AsyncMock) as mock_models:
-            mock_models.return_value = [{"name": "qwen2.5:3b", "size": 2000000, "modified_at": "2024-01-01"}]
+        with patch("app.routes.parser.list_models", new_callable=AsyncMock) as mock_models:
+            mock_models.return_value = [{"name": "llama3.2:3b", "size": 2000000, "modified_at": "2024-01-01"}]
             resp = client.get("/api/v1/models", headers={"X-API-Key": VALID_API_KEY})
 
         assert resp.status_code == 200
         body = resp.json()
         assert body["success"] is True
         assert isinstance(body["models"], list)
-        assert body["models"][0]["name"] == "qwen2.5:3b"
+        assert body["models"][0]["name"] == "llama3.2:3b"
 
 
 # ---------------------------------------------------------------------------

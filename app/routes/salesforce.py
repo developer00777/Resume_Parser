@@ -17,10 +17,10 @@ POST /api/v1/salesforce/parse-url
 import io
 import time
 import logging
+from tempfile import SpooledTemporaryFile
 
 from fastapi import APIRouter, Query
-from fastapi import UploadFile
-from starlette.datastructures import UploadFile as StarletteUploadFile
+from starlette.datastructures import Headers, UploadFile
 
 from app.services.document import extract_text
 from app.services.llm import parse_resume
@@ -46,11 +46,11 @@ def _bytes_to_upload(content: bytes, filename: str) -> UploadFile:
         if filename.lower().endswith(".pdf")
         else "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
     )
-    return UploadFile(
-        filename=filename,
-        content_type=mime,
-        file=io.BytesIO(content),
-    )
+    tmp = SpooledTemporaryFile()
+    tmp.write(content)
+    tmp.seek(0)
+    headers = Headers(headers={"content-type": mime})
+    return UploadFile(filename=filename, headers=headers, file=tmp)
 
 
 # ---------------------------------------------------------------------------
