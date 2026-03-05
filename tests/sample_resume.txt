@@ -1,0 +1,57 @@
+RAJESH KUMAR SHARMA
+Senior Software Engineer
+
+Contact Information:
+Email: rajesh.sharma@gmail.com
+Phone: +91-9876543210
+Alternate: +91-11-26543210
+Location: Bangalore, Karnataka, India
+LinkedIn: linkedin.com/in/rajeshsharma
+
+PROFESSIONAL SUMMARY
+Experienced Senior Software Engineer with 6+ years of expertise in building scalable backend systems, microservices architecture, and cloud-native applications. Proficient in Python, Go, and JavaScript with a strong focus on performance optimization and system design.
+
+SKILLS
+Python, Go, JavaScript, TypeScript, FastAPI, Django, Flask, React, Node.js, PostgreSQL, MongoDB, Redis, Docker, Kubernetes, AWS (EC2, S3, Lambda, RDS), GCP, Terraform, CI/CD, Git, REST APIs, GraphQL, Kafka, RabbitMQ, Elasticsearch, Linux, Agile/Scrum
+
+WORK EXPERIENCE
+
+Senior Software Engineer | Flipkart | Jan 2022 - Present
+- Designed and developed high-throughput order processing microservices handling 50K+ requests/minute
+- Led migration from monolithic architecture to microservices using Kubernetes, reducing deployment time by 70%
+- Implemented real-time inventory tracking system using Kafka and Redis
+- Mentored a team of 4 junior developers and conducted code reviews
+
+Software Engineer | Infosys | Jul 2019 - Dec 2021
+- Built RESTful APIs using Python/Django for enterprise banking clients
+- Developed automated testing framework that improved code coverage from 45% to 85%
+- Optimized database queries reducing average response time by 40%
+- Collaborated with cross-functional teams across 3 time zones
+
+Junior Software Developer | TCS | Jun 2017 - Jun 2019
+- Developed internal tools and dashboards using Flask and React
+- Participated in agile sprints and contributed to sprint planning
+- Wrote unit tests and integration tests for backend services
+- Assisted in database schema design for new projects
+
+EDUCATION
+
+Bachelor of Technology (B.Tech) in Computer Science and Engineering
+Indian Institute of Technology (IIT), Hyderabad
+Graduation Year: 2017
+CGPA: 8.7/10
+
+Higher Secondary (XII) - CBSE Board
+Delhi Public School, New Delhi
+Year: 2013
+Percentage: 92.4%
+
+CERTIFICATIONS
+- AWS Certified Solutions Architect - Associate (2023)
+- Certified Kubernetes Administrator (CKA) (2022)
+- Google Cloud Professional Cloud Architect (2021)
+
+PROJECTS
+- Open-source contributor to FastAPI framework (15+ merged PRs)
+- Built a real-time chat application using WebSockets and Redis Pub/Sub
+- Developed a CLI tool for automated infrastructure provisioning (500+ GitHub stars)
