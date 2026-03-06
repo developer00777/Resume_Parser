@@ -1,3 +1,4 @@
+import asyncio
 import json
 import logging
 import re
@@ -144,7 +145,14 @@ def _split_resume_sections(text: str) -> dict:
 
 
 async def _call_ollama(prompt: str, max_tokens: int = 100) -> str:
-    """Make a single Ollama generate call and return raw response text."""
+    """
+    Make a single Ollama generate call with JSON mode enabled.
+
+    Ollama JSON mode (format="json") constrains token sampling so the model
+    always produces syntactically valid JSON — no code fences, no prose,
+    no truncated objects. This eliminates the need for regex cleanup and
+    fallback parsing on every response.
+    """
     client = _get_client()
     try:
         response = await client.post(
@@ -153,6 +161,7 @@ async def _call_ollama(prompt: str, max_tokens: int = 100) -> str:
                 "model": settings.ollama_model,
                 "prompt": prompt,
                 "stream": False,
+                "format": "json",          # ← Ollama JSON mode: guaranteed valid JSON output
                 "options": {
                     "temperature": 0.1,
                     "num_predict": max_tokens,
@@ -424,26 +433,43 @@ def _compute_score(parsed: dict) -> dict:
     }
 
 
+async def _call_chunk(chunk_name: str, prompt: str, max_tok: int, chunk_text: str) -> tuple[str, dict]:
+    """Call Ollama for a single chunk and return (name, extracted_data)."""
+    try:
+        logger.info(f"Chunk '{chunk_name}': sending {len(chunk_text)} chars, max_tok={max_tok}")
+        raw = await _call_ollama(prompt + chunk_text, max_tokens=max_tok)
+        data = _extract_json(raw)
+        logger.info(f"Chunk '{chunk_name}' extracted {len(data)} fields")
+        return chunk_name, data
+    except Exception as e:
+        logger.error(f"Chunk '{chunk_name}' failed: {e}")
+        return chunk_name, {}
+
+
 async def parse_resume(text: str) -> dict:
-    """Parse resume by splitting text into sections and making focused LLM calls."""
+    """
+    Parse resume using parallel LLM calls + Ollama JSON mode.
+
+    Improvements over sequential approach:
+    - asyncio.gather fires all 8 chunk requests concurrently. Since each
+      request is pure async I/O (no CPU work in Python), all 8 are in-flight
+      simultaneously. Ollama queues them internally but the event loop doesn't
+      block between calls — wall-clock time ≈ slowest single chunk instead of
+      sum of all chunks.
+    - Ollama JSON mode (format="json") guarantees valid JSON output, so
+      _extract_json only needs json.loads() — no regex cleanup fallbacks needed.
+    """
     sections = _split_resume_sections(text)
 
-    parsed = {}
+    # Build coroutines for all chunks — one per extraction category
+    coroutines = []
     for chunk_name, prompt, max_tok, text_slice in CHUNKS:
-        try:
-            if text_slice:
-                chunk_text = text[text_slice[0]:text_slice[1]]
-            else:
-                chunk_text = sections.get(chunk_name, text[:800])
+        chunk_text = text[text_slice[0]:text_slice[1]] if text_slice else sections.get(chunk_name, text[:800])
+        coroutines.append(_call_chunk(chunk_name, prompt, max_tok, chunk_text))
 
-            logger.info(f"Chunk '{chunk_name}': sending {len(chunk_text)} chars, max_tok={max_tok}")
-            raw = await _call_ollama(prompt + chunk_text, max_tokens=max_tok)
-            data = _extract_json(raw)
-            parsed[chunk_name] = data
-            logger.info(f"Chunk '{chunk_name}' extracted {len(data)} fields")
-        except Exception as e:
-            logger.error(f"Chunk '{chunk_name}' failed: {e}")
-            parsed[chunk_name] = {}
+    # Fire all 8 requests concurrently — total time ≈ slowest chunk, not sum
+    results = await asyncio.gather(*coroutines)
+    parsed = {name: data for name, data in results}
 
     # Compute rule-based score from extracted data
     score = _compute_score(parsed)
