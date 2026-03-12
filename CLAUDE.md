@@ -144,4 +144,6 @@ Pipeline: `lint → test → docker-build`
 - **Graceful degradation:** Empty fields returned on LLM extraction failure (no crash)
 - **Auth middleware:** `X-API-Key` on all `/api/v1/*`; public: `/health`, `/docs`, `/redoc`
 - **LLM:** temperature=0.1, 8 specialized prompts, regex section-splitting before LLM
-- **Score matrix:** 7-category weighted system (contact 5%, summary 15%, experience 25%, skills 20%, education+certs 10%, achievements 15%, format 10%) — each raw 0–10, overall 0–100 with grade band (Excellent/Good/Average/Poor)
+- **Score matrix:** 7-category weighted system (contact 5%, summary 15%, experience 25%, skills 20%, education+certs 10%, achievements 15%, format 10%) — each raw 0–10, overall 0–100 with grade band (Excellent/Good/Averag  e/Poor)
+ 
+ 
