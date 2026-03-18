@@ -86,7 +86,7 @@ Text:
 # (name, prompt_template, max_tokens, text_slice)
 # text_slice=(start,end) for fixed slice, None to use section splitter
 CHUNKS = [
-    ("contact", PROMPT_CONTACT, 80, (0, 500)),
+    ("contact", PROMPT_CONTACT, 80, (0, 2000)),
     ("skills", PROMPT_SKILLS, 200, None),
     ("experience", PROMPT_EXPERIENCE, 200, None),
     ("education", PROMPT_EDUCATION, 120, None),
