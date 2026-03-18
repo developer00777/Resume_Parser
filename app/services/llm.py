@@ -48,9 +48,10 @@ Reply ONLY with JSON: {"experience":[{"company":"actual company","title":"actual
 Text:
 """
 
-PROMPT_EDUCATION = """Extract education details. Look carefully for the degree name, field/major of study, institution name, graduation year, and grade/GPA/CGPA.
+PROMPT_EDUCATION = """Extract formal education degrees from the text below. Look for B.Tech, B.E., B.Sc, M.Tech, MBA, MCA, BCA, Diploma, Bachelor, Master, PhD, and similar academic qualifications — even if listed under a certifications section.
+Do NOT include professional certifications (e.g. Primavera, Microsoft Project, Salesforce) as education.
 Reply ONLY with valid JSON. Use null for genuinely missing fields.
-Output format: {"education":[{"institution":"<university name>","degree":"<degree>","field_of_study":"<field>","year":"<year>","grade":"<grade>"}]}
+Output format: {"education":[{"institution":"<university or college name>","degree":"<degree title>","field_of_study":"<field or discipline>","year":"<year>","grade":"<grade or null>"}]}
 
 Text:
 """
