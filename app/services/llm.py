@@ -29,7 +29,7 @@ def _get_client() -> httpx.AsyncClient:
 
 PROMPT_CONTACT = """From the text below, extract the person's name, email, phone number, secondary phone number, and location.
 Reply ONLY with valid JSON. Use null (not the string "null") for any missing field.
-{"name":"John Doe","email":"john@example.com","phone":"+1234567890","number":null,"current_location":"City, State"}
+Output format: {"name":"<full name>","email":"<email>","phone":"<phone>","number":null,"current_location":"<city, country>"}
 
 Text:
 """
@@ -50,7 +50,7 @@ Text:
 
 PROMPT_EDUCATION = """Extract education details. Look carefully for the degree name, field/major of study, institution name, graduation year, and grade/GPA/CGPA.
 Reply ONLY with valid JSON. Use null for genuinely missing fields.
-{"education":[{"institution":"MIT","degree":"B.Tech","field_of_study":"Computer Science","year":"2020","grade":"8.5"}]}
+Output format: {"education":[{"institution":"<university name>","degree":"<degree>","field_of_study":"<field>","year":"<year>","grade":"<grade>"}]}
 
 Text:
 """
