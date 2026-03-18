@@ -138,6 +138,13 @@ def _split_resume_sections(text: str) -> dict:
     if "experience" in result and len(result["experience"]) < 200 and "projects" in result:
         result["experience"] = result["experience"] + "\n\n" + result["projects"]
 
+    # Education: if section is very short, degree content is likely merged under certifications
+    if "education" in result and len(result["education"]) < 100 and "certifications" in result:
+        result["education"] = result["education"] + "\n\n" + result["certifications"]
+    # Also ensure certifications section gets the same merged text so certs are extracted too
+    if "certifications" not in result and "education" in result:
+        result["certifications"] = result["education"]
+
     result["contact"] = _extract_contact_text(text)
     result["summary"] = text[:1500]
 
