@@ -86,7 +86,7 @@ Text:
 # (name, prompt_template, max_tokens, text_slice)
 # text_slice=(start,end) for fixed slice, None to use section splitter
 CHUNKS = [
-    ("contact", PROMPT_CONTACT, 80, (0, 2000)),
+    ("contact", PROMPT_CONTACT, 80, None),
     ("skills", PROMPT_SKILLS, 200, None),
     ("experience", PROMPT_EXPERIENCE, 200, None),
     ("education", PROMPT_EDUCATION, 120, None),
@@ -138,10 +138,37 @@ def _split_resume_sections(text: str) -> dict:
     if "experience" in result and len(result["experience"]) < 200 and "projects" in result:
         result["experience"] = result["experience"] + "\n\n" + result["projects"]
 
-    result["contact"] = text[:500]
+    result["contact"] = _extract_contact_text(text)
     result["summary"] = text[:1500]
 
     return result
+
+
+def _extract_contact_text(text: str) -> str:
+    """
+    Locate the contact block anywhere in the document by anchoring on the
+    first email or phone number found, then expanding 300 chars in each
+    direction to capture the nearby name and location.
+
+    Falls back to the first 2000 chars if no anchor is found.
+    """
+    # Try to anchor on email first (most reliable)
+    email_match = re.search(r'[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}', text)
+    phone_match = re.search(r'[\+\(]?[\d][\d\s\-\(\)]{7,}[\d]', text)
+
+    anchor = None
+    if email_match:
+        anchor = email_match.start()
+    elif phone_match:
+        anchor = phone_match.start()
+
+    if anchor is not None:
+        start = max(0, anchor - 300)
+        end = min(len(text), anchor + 300)
+        return text[start:end]
+
+    # No email or phone found — fall back to beginning of document
+    return text[:2000]
 
 
 async def _call_ollama(prompt: str, max_tokens: int = 100) -> str:
