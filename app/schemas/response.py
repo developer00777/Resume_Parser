@@ -166,6 +166,31 @@ class BulkParseResponse(BaseModel):
     total_processing_time_ms: float
 
 
+class BulkSalesforceParseItem(BaseModel):
+    filename: str
+    success: bool
+    data: Optional["SalesforceResumeData"] = None
+    error: Optional[str] = None
+    processing_time_ms: float = 0.0
+
+
+class BulkSalesforceParseResponse(BaseModel):
+    success: bool
+    total: int
+    parsed: int
+    failed: int
+    results: list[BulkSalesforceParseItem]
+    total_processing_time_ms: float
+
+
+class BulkJobStatus(BaseModel):
+    job_id: str
+    status: str  # "processing" | "completed" | "failed"
+    total: int
+    result: Optional["BulkParseResponse"] = None
+    error: Optional[str] = None
+
+
 class ErrorResponse(BaseModel):
     success: bool = False
     detail: str

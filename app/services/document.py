@@ -45,6 +45,24 @@ async def extract_text(file: UploadFile) -> str:
     raise HTTPException(status_code=400, detail="Unsupported file type.")
 
 
+def validate_file_bytes(filename: str, content: bytes, content_type: str) -> str:
+    """Extract text from raw bytes (used by background job tasks)."""
+    if content_type not in ALLOWED_CONTENT_TYPES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unsupported file type: {content_type}. Only PDF and DOCX are accepted.",
+        )
+    if len(content) > settings.max_file_size:
+        raise HTTPException(
+            status_code=413,
+            detail=f"File '{filename}' exceeds maximum allowed size of {settings.max_file_size} bytes.",
+        )
+    file_type = ALLOWED_CONTENT_TYPES[content_type]
+    if file_type == "pdf":
+        return _extract_pdf(content)
+    return _extract_docx(content)
+
+
 def _extract_pdf(content: bytes) -> str:
     """Extract text from PDF bytes."""
     try:

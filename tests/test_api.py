@@ -281,6 +281,135 @@ class TestBulkParseEndpoint:
         resp = client.post("/api/v1/parse-bulk")
         assert resp.status_code == 401
 
+    def test_bulk_no_files_returns_400(self):
+        resp = client.post(
+            "/api/v1/parse-bulk",
+            headers={"X-API-Key": VALID_API_KEY},
+            files=[("files", ("", io.BytesIO(b""), "application/pdf"))],
+        )
+        # FastAPI raises 422 for empty file list; we just verify it's not 200
+        assert resp.status_code in (400, 422)
+
+
+# ---------------------------------------------------------------------------
+# Bulk Salesforce parse endpoint
+# ---------------------------------------------------------------------------
+
+class TestBulkSalesforceParseEndpoint:
+    def test_bulk_salesforce_returns_scschamps_fields(self):
+        with (
+            patch("app.routes.parser.extract_text", new_callable=AsyncMock) as mock_ext,
+            patch("app.routes.parser.parse_resume", new_callable=AsyncMock) as mock_llm,
+        ):
+            mock_ext.return_value = "Resume text"
+            mock_llm.return_value = MOCK_PARSED_RESULT
+
+            files = [
+                ("files", (f"resume{i}.pdf", io.BytesIO(MINIMAL_PDF), "application/pdf"))
+                for i in range(2)
+            ]
+            resp = client.post(
+                "/api/v1/parse-bulk/salesforce",
+                headers={"X-API-Key": VALID_API_KEY},
+                files=files,
+            )
+
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["success"] is True
+        assert body["total"] == 2
+        assert body["parsed"] == 2
+        # Each result should have Salesforce field names
+        item = body["results"][0]
+        assert item["success"] is True
+        assert "Phone" in item["data"]
+        assert "SkillList" in item["data"]
+        assert "CurrentCompany" in item["data"]
+
+    def test_bulk_salesforce_too_many_files(self):
+        files = [
+            ("files", (f"resume{i}.pdf", io.BytesIO(MINIMAL_PDF), "application/pdf"))
+            for i in range(21)
+        ]
+        resp = client.post(
+            "/api/v1/parse-bulk/salesforce",
+            headers={"X-API-Key": VALID_API_KEY},
+            files=files,
+        )
+        assert resp.status_code == 400
+
+    def test_bulk_salesforce_requires_auth(self):
+        resp = client.post("/api/v1/parse-bulk/salesforce")
+        assert resp.status_code == 401
+
+
+# ---------------------------------------------------------------------------
+# Async job endpoints
+# ---------------------------------------------------------------------------
+
+class TestBulkJobEndpoints:
+    def test_submit_job_returns_202_with_job_id(self):
+        with (
+            patch("app.routes.parser.extract_text", new_callable=AsyncMock) as mock_ext,
+            patch("app.routes.parser.parse_resume", new_callable=AsyncMock) as mock_llm,
+        ):
+            mock_ext.return_value = "Resume text"
+            mock_llm.return_value = MOCK_PARSED_RESULT
+
+            files = [
+                ("files", ("resume.pdf", io.BytesIO(MINIMAL_PDF), "application/pdf"))
+            ]
+            resp = client.post(
+                "/api/v1/parse-bulk/job",
+                headers={"X-API-Key": VALID_API_KEY},
+                files=files,
+            )
+
+        assert resp.status_code == 202
+        body = resp.json()
+        assert "job_id" in body
+        assert body["status"] in ("processing", "completed")
+        assert body["total"] == 1
+
+    def test_get_job_not_found_returns_404(self):
+        resp = client.get(
+            "/api/v1/parse-bulk/job/nonexistent-job-id",
+            headers={"X-API-Key": VALID_API_KEY},
+        )
+        assert resp.status_code == 404
+
+    def test_get_job_returns_status(self):
+        with (
+            patch("app.routes.parser.extract_text", new_callable=AsyncMock) as mock_ext,
+            patch("app.routes.parser.parse_resume", new_callable=AsyncMock) as mock_llm,
+        ):
+            mock_ext.return_value = "Resume text"
+            mock_llm.return_value = MOCK_PARSED_RESULT
+
+            files = [
+                ("files", ("resume.pdf", io.BytesIO(MINIMAL_PDF), "application/pdf"))
+            ]
+            submit_resp = client.post(
+                "/api/v1/parse-bulk/job",
+                headers={"X-API-Key": VALID_API_KEY},
+                files=files,
+            )
+        assert submit_resp.status_code == 202
+        job_id = submit_resp.json()["job_id"]
+
+        poll_resp = client.get(
+            f"/api/v1/parse-bulk/job/{job_id}",
+            headers={"X-API-Key": VALID_API_KEY},
+        )
+        assert poll_resp.status_code == 200
+        body = poll_resp.json()
+        assert body["job_id"] == job_id
+        assert body["status"] in ("processing", "completed", "failed")
+
+    def test_job_requires_auth(self):
+        resp = client.post("/api/v1/parse-bulk/job")
+        assert resp.status_code == 401
+
 
 # ---------------------------------------------------------------------------
 # Salesforce parse-candidate endpoint
