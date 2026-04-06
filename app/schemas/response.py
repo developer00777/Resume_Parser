@@ -149,6 +149,23 @@ class SalesforceParseResponse(BaseModel):
 
 # ── Shared utility models ─────────────────────────────────────────────────────
 
+class BulkParseItem(BaseModel):
+    filename: str
+    success: bool
+    data: Optional["ResumeData"] = None
+    error: Optional[str] = None
+    processing_time_ms: float = 0.0
+
+
+class BulkParseResponse(BaseModel):
+    success: bool
+    total: int
+    parsed: int
+    failed: int
+    results: list[BulkParseItem]
+    total_processing_time_ms: float
+
+
 class ErrorResponse(BaseModel):
     success: bool = False
     detail: str
@@ -156,7 +173,7 @@ class ErrorResponse(BaseModel):
 
 class HealthResponse(BaseModel):
     status: str
-    ollama_connected: bool
+    openrouter_connected: bool
     model: str
 
 
@@ -173,14 +190,24 @@ class ModelsResponse(BaseModel):
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
+def _is_current_job(exp: dict) -> bool:
+    """Return True if the duration field suggests an ongoing role."""
+    duration = (exp.get("duration") or "").lower()
+    return any(kw in duration for kw in ("present", "current", "now", "till date", "ongoing"))
+
+
 def map_to_salesforce(parsed: dict) -> SalesforceResumeData:
     """Map the internal parsed dict to SalesforceResumeData field names."""
     skills: list[str] = parsed.get("skills", [])
     experience: list[dict] = parsed.get("experience", [])
     score = parsed.get("resume_score", {})
 
-    # Current company / designation from first experience entry
-    current_exp = experience[0] if experience else {}
+    # Current company: prefer any entry marked as ongoing/present;
+    # otherwise fall back to the first entry (LLM is instructed to sort newest-first).
+    current_exp = next(
+        (e for e in experience if _is_current_job(e)),
+        experience[0] if experience else {},
+    )
 
     # Build comma-separated skill list
     skill_list = ", ".join(skills) if skills else None

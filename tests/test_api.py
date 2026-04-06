@@ -1,7 +1,7 @@
 """
 Pytest test suite for Resume Parser API.
 
-All external dependencies (Ollama, Salesforce) are mocked so tests run
+All external dependencies (OpenRouter, Salesforce) are mocked so tests run
 in CI without any live services.
 
 Run:
@@ -10,7 +10,6 @@ Run:
 from __future__ import annotations
 
 import io
-import json
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -38,7 +37,7 @@ MOCK_PARSED_RESULT = {
         {
             "company": "Acme Corp",
             "title": "Software Engineer",
-            "duration": "2021 – 2024",
+            "duration": "2021 – Present",
             "description": "Built microservices and REST APIs.",
         }
     ],
@@ -88,16 +87,23 @@ MINIMAL_PDF = (
 # ---------------------------------------------------------------------------
 
 class TestHealth:
-    def test_health_ollama_up(self):
-        with patch("httpx.AsyncClient.get", new_callable=AsyncMock) as mock_get:
-            mock_get.return_value.__aenter__ = AsyncMock(return_value=mock_get.return_value)
-            mock_get.return_value.__aexit__ = AsyncMock(return_value=False)
-            mock_get.return_value.status_code = 200
+    def test_health_openrouter_up(self):
+        with patch("app.services.llm.check_openrouter", new_callable=AsyncMock) as mock_check:
+            mock_check.return_value = True
             resp = client.get("/health")
         assert resp.status_code == 200
         body = resp.json()
-        assert body["status"] in ("healthy", "degraded")
-        assert "ollama_connected" in body
+        assert body["status"] == "healthy"
+        assert body["openrouter_connected"] is True
+
+    def test_health_openrouter_down(self):
+        with patch("app.services.llm.check_openrouter", new_callable=AsyncMock) as mock_check:
+            mock_check.return_value = False
+            resp = client.get("/health")
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["status"] == "degraded"
+        assert body["openrouter_connected"] is False
 
     def test_health_no_auth_required(self):
         resp = client.get("/health")
@@ -196,20 +202,84 @@ class TestParseEndpoint:
 
 
 # ---------------------------------------------------------------------------
-# Models endpoint
+# Bulk parse endpoint
 # ---------------------------------------------------------------------------
 
-class TestModelsEndpoint:
-    def test_models_returns_list(self):
-        with patch("app.routes.parser.list_models", new_callable=AsyncMock) as mock_models:
-            mock_models.return_value = [{"name": "llama3.2:3b", "size": 2000000, "modified_at": "2024-01-01"}]
-            resp = client.get("/api/v1/models", headers={"X-API-Key": VALID_API_KEY})
+class TestBulkParseEndpoint:
+    def test_bulk_parse_multiple_files(self):
+        with (
+            patch("app.routes.parser.extract_text", new_callable=AsyncMock) as mock_ext,
+            patch("app.routes.parser.parse_resume", new_callable=AsyncMock) as mock_llm,
+        ):
+            mock_ext.return_value = "Resume text"
+            mock_llm.return_value = MOCK_PARSED_RESULT
+
+            files = [
+                ("files", (f"resume{i}.pdf", io.BytesIO(MINIMAL_PDF), "application/pdf"))
+                for i in range(3)
+            ]
+            resp = client.post(
+                "/api/v1/parse-bulk",
+                headers={"X-API-Key": VALID_API_KEY},
+                files=files,
+            )
 
         assert resp.status_code == 200
         body = resp.json()
         assert body["success"] is True
-        assert isinstance(body["models"], list)
-        assert body["models"][0]["name"] == "llama3.2:3b"
+        assert body["total"] == 3
+        assert body["parsed"] == 3
+        assert body["failed"] == 0
+        assert len(body["results"]) == 3
+        assert "total_processing_time_ms" in body
+
+    def test_bulk_parse_too_many_files_returns_400(self):
+        files = [
+            ("files", (f"resume{i}.pdf", io.BytesIO(MINIMAL_PDF), "application/pdf"))
+            for i in range(21)
+        ]
+        resp = client.post(
+            "/api/v1/parse-bulk",
+            headers={"X-API-Key": VALID_API_KEY},
+            files=files,
+        )
+        assert resp.status_code == 400
+
+    def test_bulk_parse_partial_failure(self):
+        call_count = 0
+
+        async def mock_parse_resume(text):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 2:
+                raise ValueError("Simulated LLM failure")
+            return MOCK_PARSED_RESULT
+
+        with (
+            patch("app.routes.parser.extract_text", new_callable=AsyncMock) as mock_ext,
+            patch("app.routes.parser.parse_resume", side_effect=mock_parse_resume),
+        ):
+            mock_ext.return_value = "Resume text"
+
+            files = [
+                ("files", (f"resume{i}.pdf", io.BytesIO(MINIMAL_PDF), "application/pdf"))
+                for i in range(3)
+            ]
+            resp = client.post(
+                "/api/v1/parse-bulk",
+                headers={"X-API-Key": VALID_API_KEY},
+                files=files,
+            )
+
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["total"] == 3
+        assert body["parsed"] == 2
+        assert body["failed"] == 1
+
+    def test_bulk_requires_auth(self):
+        resp = client.post("/api/v1/parse-bulk")
+        assert resp.status_code == 401
 
 
 # ---------------------------------------------------------------------------
@@ -310,6 +380,23 @@ class TestSalesforceMapping:
         assert sf.SkillList == "Python, FastAPI, Salesforce, Docker"
         assert sf.AutoPopulate_Skillset is True
         assert "Acme Corp" in (sf.ResumeRich or "")
+
+    def test_map_current_company_picks_present_role(self):
+        """Current company should be the role with 'Present' in duration, not the first entry."""
+        from app.schemas.response import map_to_salesforce
+
+        parsed = {
+            **MOCK_PARSED_RESULT,
+            "experience": [
+                {"company": "OldCorp", "title": "Junior Dev", "duration": "2015 - 2018", "description": "Legacy work."},
+                {"company": "MidCorp", "title": "Developer", "duration": "2018 - 2021", "description": "Mid work."},
+                {"company": "NewCorp", "title": "Senior Engineer", "duration": "2021 - Present", "description": "Current role."},
+                {"company": "AnotherOld", "title": "Intern", "duration": "2013 - 2015", "description": "Early career."},
+            ],
+        }
+        sf = map_to_salesforce(parsed)
+        assert sf.CurrentCompany == "NewCorp"
+        assert sf.CurrentDesignation == "Senior Engineer"
 
     def test_map_empty_parsed(self):
         from app.schemas.response import map_to_salesforce

@@ -11,29 +11,37 @@ from app.config import settings
 logger = logging.getLogger(__name__)
 
 # Reusable HTTP client — avoids connection setup overhead on every call
-_ollama_client: httpx.AsyncClient | None = None
+_openrouter_client: httpx.AsyncClient | None = None
+
+# Per-chunk timeout (seconds). Cloud LLMs are fast; 25 s is generous.
+_CHUNK_TIMEOUT = 25.0
 
 
 def _get_client() -> httpx.AsyncClient:
-    """Return a reusable async HTTP client for Ollama calls."""
-    global _ollama_client
-    if _ollama_client is None or _ollama_client.is_closed:
-        _ollama_client = httpx.AsyncClient(
-            timeout=httpx.Timeout(600.0, connect=30.0),
-            base_url=settings.ollama_host,
+    """Return a reusable async HTTP client for OpenRouter calls."""
+    global _openrouter_client
+    if _openrouter_client is None or _openrouter_client.is_closed:
+        _openrouter_client = httpx.AsyncClient(
+            timeout=httpx.Timeout(_CHUNK_TIMEOUT, connect=10.0),
+            base_url=settings.openrouter_base_url,
+            headers={
+                "Authorization": f"Bearer {settings.openrouter_api_key}",
+                "Content-Type": "application/json",
+                "HTTP-Referer": "https://resumeparser-production-45b1.up.railway.app",
+                "X-Title": "Resume Parser API",
+            },
         )
-    return _ollama_client
+    return _openrouter_client
 
 
 # ---------------------------------------------------------------------------
 # Prompts
 #
-# Design rules for llama3.2:3b (small model):
-#   1. NO concrete example values — small models copy them verbatim.
+# Design rules:
+#   1. NO concrete example values — models may copy them verbatim.
 #      Use <angle-bracket> placeholders in the output format line only.
 #   2. Lead with WHAT to extract, then HOW to format, then hard rules.
-#   3. State "If not found return []" / "return null" explicitly — the model
-#      needs to be told the empty-case behaviour or it hallucinates.
+#   3. State "If not found return []" / "return null" explicitly.
 #   4. One JSON key per prompt — keeps the output short and predictable.
 #   5. Forbid fabrication explicitly ("ONLY from the text", "DO NOT invent").
 # ---------------------------------------------------------------------------
@@ -79,6 +87,7 @@ Rules:
 - title: the exact job title
 - duration: dates as written (e.g. "Jan 2020 - Present")
 - description: write ONE sentence summarising what they did — based ONLY on the text
+- Order entries from MOST RECENT to OLDEST (current/present job first)
 - DO NOT invent companies, titles, or dates
 - If no experience found, return {"experience": []}
 
@@ -161,14 +170,14 @@ Resume text:
 # (chunk_name, prompt_template, max_tokens, text_slice)
 # text_slice=(start,end) uses a fixed character slice; None uses the section splitter
 CHUNKS = [
-    ("contact",        PROMPT_CONTACT,        120, None),
-    ("skills",         PROMPT_SKILLS,         300, None),
-    ("experience",     PROMPT_EXPERIENCE,     400, None),
-    ("education",      PROMPT_EDUCATION,      200, None),
-    ("certifications", PROMPT_CERTIFICATIONS, 200, None),
-    ("projects",       PROMPT_PROJECTS,       350, None),
-    ("awards",         PROMPT_AWARDS,         120, None),
-    ("summary",        PROMPT_SUMMARY,        120, None),
+    ("contact",        PROMPT_CONTACT,        120,  None),
+    ("skills",         PROMPT_SKILLS,         400,  None),
+    ("experience",     PROMPT_EXPERIENCE,     1200, None),  # raised to handle long work histories
+    ("education",      PROMPT_EDUCATION,      300,  None),
+    ("certifications", PROMPT_CERTIFICATIONS, 300,  None),
+    ("projects",       PROMPT_PROJECTS,       600,  None),
+    ("awards",         PROMPT_AWARDS,         150,  None),
+    ("summary",        PROMPT_SUMMARY,        150,  None),
 ]
 
 
@@ -179,22 +188,27 @@ CHUNKS = [
 # Header patterns — catches most resume styles (title case, upper case, with
 # optional leading whitespace / bullet chars)
 _HEADER_PATTERNS = {
-    "skills":         r'(?:^|\n)[^\n]{0,10}(?:TECHNICAL\s+SKILLS?|SKILLS?|TECHNOLOGIES|TOOLS\s*&?\s*TECH(?:NOLOGIES)?|CORE\s+COMPETENCIES)[^\n]{0,20}(?:\n|$)',
+    # Exclude "Soft Skills" (sidebar label).
+    # Also accept "IT Skills" and "Areas of Expertise" as skills section markers.
+    "skills":         r'(?:^|\n)[^\n]{0,10}(?:TECHNICAL\s+SKILLS?|IT\s+SKILLS?|AREAS?\s+OF\s+EXPERTISE|TECHNOLOGIES|TOOLS\s*&?\s*TECH(?:NOLOGIES)?|CORE\s+COMPETENCIES|(?<!SOFT\s)SKILLS?)[^\n]{0,20}(?:\n|$)',
     "experience":     r'(?:^|\n)[^\n]{0,10}(?:WORK\s+EXPERIENCE|PROFESSIONAL\s+EXPERIENCE|EXPERIENCE|EMPLOYMENT\s+HISTORY|CAREER\s+HISTORY|WORK\s+HISTORY)[^\n]{0,20}(?:\n|$)',
     "education":      r'(?:^|\n)[^\n]{0,10}(?:EDUCATION(?:AL)?\s*(?:BACKGROUND|QUALIFICATION)?|ACADEMIC\s+(?:BACKGROUND|QUALIFICATION|DETAILS)?|QUALIFICATION)[^\n]{0,20}(?:\n|$)',
-    "projects":       r'(?:^|\n)[^\n]{0,10}(?:PROJECTS?(?:\s+EXPERIENCE)?|KEY\s+PROJECTS?)[^\n]{0,20}(?:\n|$)',
+    # Match "PROJECTS" as a standalone section header — not "Project Execution/Management" in competency lists.
+    # Uses a lookahead so the word PROJECTS is immediately followed by whitespace/end-of-line, not more words.
+    "projects":       r'(?:^|\n)[^\n]{0,10}(?:KEY\s+PROJECTS?|PERSONAL\s+PROJECTS?|PROJECTS?\s*(?:EXPERIENCE|UNDERTAKEN|HANDLED|DETAILS)?)\s*\n',
     "certifications": r'(?:^|\n)[^\n]{0,10}(?:CERTIFICATIONS?|CERTIFICATES?|PROFESSIONAL\s+CERTIFICATIONS?|LICENSES?\s*&?\s*CERTIFICATIONS?)[^\n]{0,20}(?:\n|$)',
-    "awards":         r'(?:^|\n)[^\n]{0,10}(?:AWARDS?|HONOURS?|HONORS?|ACHIEVEMENTS?|SCHOLARSHIPS?|RECOGNITION)[^\n]{0,20}(?:\n|$)',
+    # ACHIEVEMENTS often appears as its own section; exclude when it's part of "Key Achievements" in a job bullet
+    "awards":         r'(?:^|\n)[^\n]{0,10}(?:AWARDS?\s*(?:&\s*(?:HONOURS?|HONORS?|SCHOLARSHIPS?|RECOGNITION))?|HONOURS?|HONORS?|SCHOLARSHIPS?|RECOGNITION)\s*\n',
 }
 
 # How many chars to allow per section (generous — better to send more than truncate)
 _SECTION_CHAR_LIMIT = {
-    "skills":         2000,
-    "experience":     3000,
-    "education":      1500,
-    "projects":       2000,
-    "certifications": 1500,
-    "awards":         1000,
+    "skills":         2500,
+    "experience":     6000,   # raised: 70% of real resumes have experience > 3000c
+    "education":      2000,
+    "projects":       3000,
+    "certifications": 2000,
+    "awards":         1500,
     "contact":        1000,
     "summary":        2000,
 }
@@ -227,22 +241,58 @@ def _split_resume_sections(text: str) -> dict:
 
     # ── Fallback: no sections detected at all (plain text / no headers) ──────
     if not result:
-        result["skills"]         = text[:2000]
-        result["experience"]     = text[:3000]
-        result["education"]      = text[:1500]
-        result["certifications"] = text[:1500]
-        result["projects"]       = text[:2000]
-        result["awards"]         = text[:1000]
+        result["skills"]         = text[:2500]
+        result["experience"]     = text[:6000]
+        result["education"]      = text[:2000]
+        result["certifications"] = text[:2000]
+        result["projects"]       = text[:3000]
+        result["awards"]         = text[:1500]
 
     # ── Fallback: skills section too short → grab from header to end of text ──
-    if "skills" in result and len(result["skills"]) < 80:
+    if "skills" in result and len(result.get("skills", "")) < 80:
         skills_pos = positions.get("skills", 0)
-        result["skills"] = text[skills_pos:].strip()[:2000]
+        result["skills"] = text[skills_pos:].strip()[:2500]
 
-    # ── Fallback: experience too short → try merging with projects ────────────
-    if result.get("experience") and len(result["experience"]) < 200:
+    # ── Augment skills: always merge in any separate IT Skills block ──────────
+    # Multi-column resumes often split "Areas of Expertise" (soft/domain skills)
+    # from "IT Skills" (technical tools). Append IT Skills content if it exists
+    # at a different location than the already-detected skills section.
+    it_match = re.search(r'(?:^|\n)[^\n]{0,10}IT\s+SKILLS?[^\n]{0,20}(?:\n|$)', text, re.IGNORECASE)
+    if it_match and it_match.start() != positions.get("skills", -1):
+        it_text = text[it_match.start():it_match.start() + 500].strip()
+        existing_skills = result.get("skills", "")
+        if it_text and it_text not in existing_skills:
+            result["skills"] = (existing_skills + "\n\n" + it_text)[:2500]
+
+    # ── Fix: if awards section contains project content, extract projects ──────
+    # Happens when AWARDS header appears before PROJECTS in the document — the
+    # awards section runs from its header all the way through the projects block.
+    awards_text = result.get("awards", "")
+    projects_header_in_awards = re.search(
+        r'(?:^|\n)[^\n]{0,10}(?:KEY\s+PROJECTS?|PERSONAL\s+PROJECTS?|PROJECTS?\s*(?:EXPERIENCE|UNDERTAKEN|HANDLED|DETAILS)?)\s*\n',
+        awards_text, re.IGNORECASE
+    )
+    if projects_header_in_awards and "projects" not in result:
+        proj_start = projects_header_in_awards.start()
+        result["projects"] = awards_text[proj_start:proj_start + 3000].strip()
+        result["awards"]   = awards_text[:proj_start].strip()
+
+    # ── Fallback: experience too short → merge in projects section ────────────
+    # Some resumes put detailed job descriptions under "Projects" instead of
+    # "Experience". If experience has only job titles (< 400c), append projects.
+    if result.get("experience") and len(result["experience"]) < 400:
         if result.get("projects"):
             result["experience"] = result["experience"] + "\n\n" + result["projects"]
+
+    # ── Fallback: education content is sparse (multi-column placeholder) ──────
+    # Multi-column PDFs emit the section header then many blank lines before
+    # actual content. Detect by checking non-whitespace density < 20%.
+    edu_text = result.get("education", "")
+    edu_nonws = len(re.sub(r'\s', '', edu_text))
+    edu_is_sparse = len(edu_text) > 0 and edu_nonws / len(edu_text) < 0.20
+    if edu_is_sparse and "education" in positions:
+        # Extend to end of document — the real content is after all column headers
+        result["education"] = text[positions["education"]:].strip()[:3000]
 
     # ── Fallback: education too short → degrees are likely under certifications
     if result.get("education") and len(result["education"]) < 120:
@@ -299,38 +349,36 @@ def _extract_contact_text(text: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Ollama client
+# OpenRouter client
 # ---------------------------------------------------------------------------
 
-async def _call_ollama(prompt: str, max_tokens: int = 100) -> str:
-    """Make a single Ollama generate call with JSON mode enabled."""
+async def _call_openrouter(prompt: str, max_tokens: int = 200) -> str:
+    """Make a single OpenRouter chat-completion call."""
     client = _get_client()
     try:
         response = await client.post(
-            "/api/generate",
+            "/chat/completions",
             json={
-                "model": settings.ollama_model,
-                "prompt": prompt,
-                "stream": False,
-                "format": "json",
-                "options": {
-                    "temperature": 0.1,
-                    "num_predict": max_tokens,
-                },
+                "model": settings.openrouter_model,
+                "messages": [{"role": "user", "content": prompt}],
+                "max_tokens": max_tokens,
+                "temperature": 0.1,
+                "response_format": {"type": "json_object"},
             },
         )
         response.raise_for_status()
     except httpx.ConnectError:
-        logger.error("Cannot connect to Ollama service")
-        raise HTTPException(status_code=503, detail="Ollama service is unavailable. Ensure it is running.")
+        logger.error("Cannot connect to OpenRouter")
+        raise HTTPException(status_code=503, detail="OpenRouter service is unavailable.")
     except httpx.TimeoutException:
-        logger.error("Ollama chunk request timed out")
+        logger.error("OpenRouter request timed out")
         raise HTTPException(status_code=504, detail="LLM processing timed out.")
     except httpx.HTTPStatusError as e:
-        logger.error(f"Ollama returned error: {e.response.status_code}")
-        raise HTTPException(status_code=502, detail=f"Ollama returned an error: {e.response.status_code}")
+        logger.error(f"OpenRouter returned error: {e.response.status_code} — {e.response.text[:300]}")
+        raise HTTPException(status_code=502, detail=f"LLM service returned an error: {e.response.status_code}")
 
-    return response.json().get("response", "")
+    data = response.json()
+    return data["choices"][0]["message"]["content"]
 
 
 def _clean_response(raw: str) -> str:
@@ -556,10 +604,10 @@ def _compute_score(parsed: dict) -> dict:
 # ---------------------------------------------------------------------------
 
 async def _call_chunk(chunk_name: str, prompt: str, max_tok: int, chunk_text: str) -> tuple[str, dict]:
-    """Call Ollama for a single chunk and return (name, extracted_data)."""
+    """Call OpenRouter for a single chunk and return (name, extracted_data)."""
     try:
         logger.info(f"Chunk '{chunk_name}': sending {len(chunk_text)} chars, max_tok={max_tok}")
-        raw = await _call_ollama(prompt + chunk_text, max_tokens=max_tok)
+        raw = await _call_openrouter(prompt + chunk_text, max_tokens=max_tok)
         data = _extract_json(raw)
         logger.info(f"Chunk '{chunk_name}' extracted {len(data)} fields")
         return chunk_name, data
@@ -570,10 +618,11 @@ async def _call_chunk(chunk_name: str, prompt: str, max_tok: int, chunk_text: st
 
 async def parse_resume(text: str) -> dict:
     """
-    Parse resume using parallel LLM calls + Ollama JSON mode.
+    Parse resume using parallel LLM calls via OpenRouter.
 
     All 8 chunk requests fire concurrently via asyncio.gather.
     Wall-clock time ≈ slowest single chunk, not the sum of all.
+    An overall 90-second guard prevents runaway requests.
     """
     sections = _split_resume_sections(text)
 
@@ -582,7 +631,15 @@ async def parse_resume(text: str) -> dict:
         chunk_text = text[text_slice[0]:text_slice[1]] if text_slice else sections.get(chunk_name, text[:800])
         coroutines.append(_call_chunk(chunk_name, prompt, max_tok, chunk_text))
 
-    results = await asyncio.gather(*coroutines)
+    try:
+        results = await asyncio.wait_for(
+            asyncio.gather(*coroutines),
+            timeout=90.0,
+        )
+    except asyncio.TimeoutError:
+        logger.error("parse_resume: overall 90-second timeout exceeded")
+        raise HTTPException(status_code=504, detail="Resume parsing timed out. Try a smaller file.")
+
     parsed = {name: data for name, data in results}
 
     score = _compute_score(parsed)
@@ -613,15 +670,11 @@ async def parse_resume(text: str) -> dict:
     }
 
 
-async def list_models() -> list[dict]:
-    """List available models from Ollama."""
+async def check_openrouter() -> bool:
+    """Check if OpenRouter is reachable and the API key is valid."""
     client = _get_client()
     try:
-        response = await client.get("/api/tags")
-        response.raise_for_status()
-    except httpx.ConnectError:
-        raise HTTPException(status_code=503, detail="Ollama service is unavailable.")
-    except httpx.HTTPStatusError as e:
-        raise HTTPException(status_code=502, detail=f"Ollama returned an error: {e.response.status_code}")
-
-    return response.json().get("models", [])
+        resp = await client.get("/models")
+        return resp.status_code == 200
+    except Exception:
+        return False

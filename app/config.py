@@ -2,9 +2,10 @@ from pydantic_settings import BaseSettings
 
 
 class Settings(BaseSettings):
-    # ── Ollama ────────────────────────────────────────────────────────────────
-    ollama_host: str = "http://ollama:11434"
-    ollama_model: str = "llama3.2:3b"
+    # ── OpenRouter ────────────────────────────────────────────────────────────
+    openrouter_api_key: str = ""
+    openrouter_model: str = "openai/gpt-4o-mini"
+    openrouter_base_url: str = "https://openrouter.ai/api/v1"
 
     # ── Application ───────────────────────────────────────────────────────────
     api_key: str = "changeme"
