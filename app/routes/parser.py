@@ -110,7 +110,7 @@ def _to_resume_data(parsed: dict) -> ResumeData:
     )
 router = APIRouter(prefix="/api/v1", tags=["parser"])
 
-_BULK_MAX_FILES = 20
+_BULK_MAX_FILES = 15
 # Wall-clock budget for synchronous bulk requests (seconds).
 _BULK_TIMEOUT = 110.0
 # Max parallel LLM calls — prevents OpenRouter rate-limit errors on large batches.
@@ -216,10 +216,10 @@ def _validate_bulk_files(files: list[UploadFile]) -> None:
 
 @router.post("/parse-bulk", response_model=BulkParseResponse)
 async def parse_bulk(
-    files: List[UploadFile] = File(..., description="Up to 20 resume files (PDF or DOCX)"),
+    files: List[UploadFile] = File(..., description="Up to 15 resume files (PDF or DOCX)"),
 ):
     """
-    Parse up to 20 resume files in a single request.
+    Parse up to 15 resume files in a single request.
 
     All resumes are processed concurrently (max 5 at a time). The total
     request completes within ~110 seconds (Salesforce async callout limit).
@@ -256,10 +256,10 @@ async def parse_bulk(
 
 @router.post("/parse-bulk/salesforce", response_model=BulkSalesforceParseResponse)
 async def parse_bulk_salesforce(
-    files: List[UploadFile] = File(..., description="Up to 20 resume files (PDF or DOCX)"),
+    files: List[UploadFile] = File(..., description="Up to 15 resume files (PDF or DOCX)"),
 ):
     """
-    Parse up to 20 resume files and return SCSCHAMPS-mapped Salesforce JSON for each.
+    Parse up to 15 resume files and return SCSCHAMPS-mapped Salesforce JSON for each.
 
     Same concurrency and timeout rules as /parse-bulk.
     Use this endpoint when feeding results directly into Salesforce SCSCHAMPS fields.
@@ -344,7 +344,7 @@ async def _run_bulk_job(job_id: str, file_bytes: list[tuple[str, bytes, str]]) -
 
 @router.post("/parse-bulk/job", response_model=BulkJobStatus, status_code=202)
 async def submit_bulk_job(
-    files: List[UploadFile] = File(..., description="Up to 20 resume files (PDF or DOCX)"),
+    files: List[UploadFile] = File(..., description="Up to 15 resume files (PDF or DOCX)"),
 ):
     """
     Submit a bulk parse job and get back a job_id immediately (HTTP 202).
