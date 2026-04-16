@@ -1,8 +1,8 @@
 FROM python:3.11-slim
 
 # LLM model used by this service
-LABEL llm.model="llama3.2:3b" \
-      llm.provider="ollama" \
+LABEL llm.model="openai/gpt-4o-mini" \
+      llm.provider="openrouter" \
       maintainer="Resume Parser API"
 
 WORKDIR /app

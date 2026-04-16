@@ -49,29 +49,57 @@ def _get_client() -> httpx.AsyncClient:
 PROMPT_CONTACT = """You are a resume parser. Extract the candidate's contact information from the resume text below.
 
 Return ONLY valid JSON with these exact keys (use null for any field not found):
-{"name": "<full name>", "email": "<email address>", "phone": "<primary phone>", "number": "<secondary phone or null>", "current_location": "<city and/or country>"}
+{"first_name": "<first name>", "last_name": "<last name>", "full_name": "<full name>", "email": "<primary email address>", "alternate_email": "<secondary/alternate email or null>", "phone": "<primary phone with country code if present>", "alternate_phone": "<secondary phone or null>", "current_location": "<city, state/country>", "linkedin_url": "<LinkedIn profile URL or null>", "web_address": "<personal website/portfolio/GitHub URL or null>"}
 
 Rules:
-- name: the person's actual full name — NOT their job title, NOT a company name
+- first_name: the candidate's given/first name only
+- last_name: the candidate's family/last name only
+- full_name: the complete name as written on the resume
 - email: must contain @ symbol
-- phone/number: digits only with optional + prefix — ignore salary figures like 12,00,000
-- current_location: city/state/country — if "OPEN" or "Anywhere" is written, use null
+- alternate_email: a second email if present, else null
+- phone: digits only with optional + prefix — ignore salary figures like 12,00,000
+- alternate_phone: a second phone number if present, else null
+- current_location: city, state, country as written — if "OPEN" or "Anywhere", use null
+- linkedin_url: must contain "linkedin.com" — extract the full URL
+- web_address: personal website, portfolio, or GitHub URL (not LinkedIn)
 - If a field is genuinely absent, use null
 - DO NOT invent or guess any value
 
 Resume text:
 """
 
-PROMPT_SKILLS = """You are a resume parser. List every technical skill, tool, technology, software, and methodology explicitly mentioned in the resume text below.
+PROMPT_PERSONAL = """You are a resume parser. Extract personal details from the resume text below.
 
-Return ONLY valid JSON:
-{"skills": ["<skill1>", "<skill2>", ...]}
+Return ONLY valid JSON with these exact keys (use null for any field not found):
+{"date_of_birth": "<YYYY-MM-DD or null>", "gender": "<Male/Female/Other or null>", "nationality": "<nationality or null>", "father_name": "<father's name or null>", "mother_name": "<mother's name or null>", "aadhar_number": "<Aadhar number or null>", "pan_number": "<PAN number or null>", "passport_number": "<passport number or null>", "blood_group": "<blood group or null>", "languages_known": "<comma-separated languages or null>", "marital_status": "<marital status or null>"}
 
 Rules:
+- date_of_birth: convert to YYYY-MM-DD format if found (e.g. "15 Jan 1990" → "1990-01-15")
+- gender: normalize to exactly "Male", "Female", or "Other"
+- aadhar_number: 12-digit Indian ID number (may have spaces like "1234 5678 9012")
+- pan_number: 10-character alphanumeric Indian tax ID (e.g. "ABCDE1234F")
+- passport_number: alphanumeric passport ID
+- blood_group: e.g. "O+", "A-", "B+", "AB+"
+- languages_known: comma-separated list of languages
+- If a field is genuinely absent, use null
+- DO NOT invent or guess any value
+
+Resume text:
+"""
+
+PROMPT_SKILLS = """You are a resume parser. Extract and categorize all skills mentioned in the resume text below.
+
+Return ONLY valid JSON:
+{"primary_skills": ["<top 5-10 core/primary skills>"], "technical_skills": ["<all technical skills, tools, technologies, software>"], "general_skills": ["<soft skills, domain skills, methodologies>"], "all_skills": ["<every skill mentioned>"]}
+
+Rules:
+- primary_skills: the candidate's top 5-10 most prominent skills (most mentioned, featured in title/summary, or listed first)
+- technical_skills: programming languages, frameworks, tools, databases, cloud platforms, software
+- general_skills: soft skills, management skills, methodologies (Agile, Scrum), domain knowledge
+- all_skills: the complete union of all skills found
 - Copy skill names exactly as written in the text
-- Include hard skills AND soft skills if listed
 - DO NOT add skills that are not in the text
-- If no skills are found, return {"skills": []}
+- If no skills are found, return empty arrays for all keys
 
 Resume text:
 """
@@ -79,7 +107,7 @@ Resume text:
 PROMPT_EXPERIENCE = """You are a resume parser. Extract every work experience entry from the resume text below.
 
 Return ONLY valid JSON:
-{"experience": [{"company": "<company name>", "title": "<job title>", "duration": "<start date - end date>", "description": "<one sentence summary of responsibilities>"}]}
+{"experience": [{"company": "<company name>", "title": "<job title>", "duration": "<start date - end date>", "description": "<one sentence summary of responsibilities>", "department": "<department or null>"}], "total_years_of_experience": <numeric years as decimal e.g. 5.5 or null>, "number_of_companies": <integer count of distinct companies or null>, "current_company": "<name of current/most recent employer or null>", "current_designation": "<current job title or null>", "current_ctc": "<current salary/CTC as mentioned or null>", "expected_ctc": "<expected salary/CTC as mentioned or null>", "notice_period": "<notice period as mentioned or null>", "current_employment_status": "<Employed/Unemployed/Freelancer or null>", "industry": "<industry/domain the candidate works in or null>", "preferred_location": "<preferred work location or null>"}
 
 Rules:
 - Extract ALL jobs/roles listed, not just the most recent
@@ -87,8 +115,14 @@ Rules:
 - title: the exact job title
 - duration: dates as written (e.g. "Jan 2020 - Present")
 - description: write ONE sentence summarising what they did — based ONLY on the text
+- department: the department/team if mentioned, else null
 - Order entries from MOST RECENT to OLDEST (current/present job first)
-- DO NOT invent companies, titles, or dates
+- total_years_of_experience: calculate from dates OR use the number if explicitly stated (e.g. "8+ years")
+- number_of_companies: count of distinct employers
+- current_ctc/expected_ctc: extract as-is with currency (e.g. "12 LPA", "₹15,00,000")
+- notice_period: e.g. "30 days", "2 months", "Immediate"
+- current_employment_status: infer from whether latest role says "Present"/"Current" → "Employed"
+- DO NOT invent companies, titles, dates, or salary figures
 - If no experience found, return {"experience": []}
 
 Resume text:
@@ -97,14 +131,20 @@ Resume text:
 PROMPT_EDUCATION = """You are a resume parser. Extract formal academic education from the resume text below.
 
 Return ONLY valid JSON:
-{"education": [{"institution": "<college or university name>", "degree": "<degree title>", "field_of_study": "<subject or discipline>", "year": "<graduation year or null>", "grade": "<grade/GPA/CGPA or null>"}]}
+{"education": [{"institution": "<college or university name>", "degree": "<degree title e.g. B.Tech, MBA, M.Sc>", "field_of_study": "<subject or discipline>", "start_year": <start year as integer or null>, "end_year": <end year/graduation year as integer or null>, "grade": "<grade/GPA/CGPA or null>"}], "highest_degree": "<highest qualification e.g. Ph.D, M.Tech, MBA, B.Tech, Diploma, 12th, 10th>", "qualification_1": "<most recent/highest degree e.g. M.Tech, MBA>", "qualification_1_type": "<Post Graduation/Graduation/Diploma/12th/10th>", "institute_1": "<institution for qualification_1>", "qualification_2": "<second qualification e.g. B.Tech, B.Sc>", "qualification_2_type": "<Post Graduation/Graduation/Diploma/12th/10th>", "institute_2": "<institution for qualification_2>", "education_detail": "<one-line summary e.g. MBA from IIM Ahmedabad, B.Tech from IIT Delhi>"}
 
 Rules:
 - Include: B.Tech, B.E., B.Sc, M.Tech, M.Sc, MBA, MCA, BCA, Ph.D, Diploma, Bachelor, Master, Post Graduate Diploma, and any other academic degree
 - Look in ALL sections including Certifications — degrees are sometimes listed there
 - DO NOT include professional course certifications (e.g. Primavera P6, Microsoft Project, Salesforce, AWS) as education entries
-- If year or grade is not mentioned, use null
+- start_year/end_year: extract as 4-digit integers (e.g. 2018, 2022). Use null if not found
+- highest_degree: the most advanced degree found
+- qualification_1: the highest/most recent degree; qualification_2: the second one
+- qualification_1_type/qualification_2_type: classify as exactly one of: "Post Graduation", "Graduation", "Diploma", "12th", "10th"
+- institute_1/institute_2: the institution names corresponding to qualification_1/qualification_2
+- education_detail: short one-line summary combining degree + institution for top qualifications
 - If no formal education is found, return {"education": []}
+- Order from MOST RECENT to OLDEST
 
 Resume text:
 """
@@ -170,10 +210,11 @@ Resume text:
 # (chunk_name, prompt_template, max_tokens, text_slice)
 # text_slice=(start,end) uses a fixed character slice; None uses the section splitter
 CHUNKS = [
-    ("contact",        PROMPT_CONTACT,        120,  None),
-    ("skills",         PROMPT_SKILLS,         400,  None),
-    ("experience",     PROMPT_EXPERIENCE,     1200, None),  # raised to handle long work histories
-    ("education",      PROMPT_EDUCATION,      300,  None),
+    ("contact",        PROMPT_CONTACT,        200,  None),
+    ("personal",       PROMPT_PERSONAL,       250,  None),
+    ("skills",         PROMPT_SKILLS,         600,  None),
+    ("experience",     PROMPT_EXPERIENCE,     1500, None),  # raised: includes professional details
+    ("education",      PROMPT_EDUCATION,      500,  None),  # raised: includes qualification metadata
     ("certifications", PROMPT_CERTIFICATIONS, 300,  None),
     ("projects",       PROMPT_PROJECTS,       600,  None),
     ("awards",         PROMPT_AWARDS,         150,  None),
@@ -199,6 +240,8 @@ _HEADER_PATTERNS = {
     "certifications": r'(?:^|\n)[^\n]{0,10}(?:CERTIFICATIONS?|CERTIFICATES?|PROFESSIONAL\s+CERTIFICATIONS?|LICENSES?\s*&?\s*CERTIFICATIONS?)[^\n]{0,20}(?:\n|$)',
     # ACHIEVEMENTS often appears as its own section; exclude when it's part of "Key Achievements" in a job bullet
     "awards":         r'(?:^|\n)[^\n]{0,10}(?:AWARDS?\s*(?:&\s*(?:HONOURS?|HONORS?|SCHOLARSHIPS?|RECOGNITION))?|HONOURS?|HONORS?|SCHOLARSHIPS?|RECOGNITION)\s*\n',
+    # Personal details section (common in Indian resumes)
+    "personal":       r'(?:^|\n)[^\n]{0,10}(?:PERSONAL\s+(?:DETAILS?|INFO(?:RMATION)?|PROFILE)|DECLARATION|BIO[\s\-]?DATA)[^\n]{0,20}(?:\n|$)',
 }
 
 # How many chars to allow per section (generous — better to send more than truncate)
@@ -210,6 +253,7 @@ _SECTION_CHAR_LIMIT = {
     "certifications": 2000,
     "awards":         1500,
     "contact":        1000,
+    "personal":       2000,
     "summary":        2000,
 }
 
@@ -247,6 +291,7 @@ def _split_resume_sections(text: str) -> dict:
         result["certifications"] = text[:2000]
         result["projects"]       = text[:3000]
         result["awards"]         = text[:1500]
+        result["personal"]       = text[:2000]
 
     # ── Fallback: skills section too short → grab from header to end of text ──
     if "skills" in result and len(result.get("skills", "")) < 80:
@@ -309,6 +354,10 @@ def _split_resume_sections(text: str) -> dict:
 
     # ── Contact: always use anchor-based extractor (not section splitter) ─────
     result["contact"] = _extract_contact_text(text)
+
+    # ── Personal: if no dedicated section, use contact block + end of document ─
+    if "personal" not in result:
+        result["personal"] = result["contact"] + "\n\n" + text[-1500:]
 
     # ── Summary: use first ~2000 chars (intro + profile summary) ─────────────
     result["summary"] = text[:2000]
@@ -445,7 +494,7 @@ def _compute_score(parsed: dict) -> dict:
     └─────────────────────────────┴────────┴──────────────────────────────────────────┘
     """
     contact    = parsed.get("contact", {})
-    skills     = parsed.get("skills", {}).get("skills", [])
+    skills     = parsed.get("skills", {}).get("all_skills", []) or parsed.get("skills", {}).get("skills", [])
     experience = parsed.get("experience", {}).get("experience", [])
     education  = parsed.get("education", {}).get("education", [])
     certs      = parsed.get("certifications", {}).get("certifications", [])
@@ -644,29 +693,78 @@ async def parse_resume(text: str) -> dict:
 
     score = _compute_score(parsed)
 
-    contact      = parsed.get("contact", {})
-    skills_data  = parsed.get("skills", {})
-    exp_data     = parsed.get("experience", {})
-    edu_data     = parsed.get("education", {})
-    cert_data    = parsed.get("certifications", {})
-    proj_data    = parsed.get("projects", {})
-    award_data   = parsed.get("awards", {})
-    summary_data = parsed.get("summary", {})
+    contact       = parsed.get("contact", {})
+    personal      = parsed.get("personal", {})
+    skills_data   = parsed.get("skills", {})
+    exp_data      = parsed.get("experience", {})
+    edu_data      = parsed.get("education", {})
+    cert_data     = parsed.get("certifications", {})
+    proj_data     = parsed.get("projects", {})
+    award_data    = parsed.get("awards", {})
+    summary_data  = parsed.get("summary", {})
 
     return {
-        "name":             contact.get("name"),
-        "email":            contact.get("email"),
-        "phone":            contact.get("phone"),
-        "number":           contact.get("number"),
-        "current_location": contact.get("current_location"),
-        "skills":           skills_data.get("skills", []),
-        "experience":       exp_data.get("experience", []),
-        "education":        edu_data.get("education", []),
-        "projects":         proj_data.get("projects", []),
-        "certifications":   cert_data.get("certifications", []),
-        "awards":           award_data.get("awards", []),
-        "summary":          summary_data.get("summary"),
-        "resume_score":     score,
+        # Contact
+        "first_name":         contact.get("first_name"),
+        "last_name":          contact.get("last_name"),
+        "name":               contact.get("full_name"),
+        "email":              contact.get("email"),
+        "alternate_email":    contact.get("alternate_email"),
+        "phone":              contact.get("phone"),
+        "number":             contact.get("alternate_phone"),
+        "current_location":   contact.get("current_location"),
+        "linkedin_url":       contact.get("linkedin_url"),
+        "web_address":        contact.get("web_address"),
+
+        # Personal
+        "date_of_birth":      personal.get("date_of_birth"),
+        "gender":             personal.get("gender"),
+        "nationality":        personal.get("nationality"),
+        "father_name":        personal.get("father_name"),
+        "mother_name":        personal.get("mother_name"),
+        "aadhar_number":      personal.get("aadhar_number"),
+        "pan_number":         personal.get("pan_number"),
+        "passport_number":    personal.get("passport_number"),
+        "blood_group":        personal.get("blood_group"),
+        "languages_known":    personal.get("languages_known"),
+        "marital_status":     personal.get("marital_status"),
+
+        # Skills (categorized)
+        "skills":             skills_data.get("all_skills", []),
+        "primary_skills":     skills_data.get("primary_skills", []),
+        "technical_skills":   skills_data.get("technical_skills", []),
+        "general_skills":     skills_data.get("general_skills", []),
+
+        # Experience + professional details
+        "experience":                exp_data.get("experience", []),
+        "total_years_of_experience": exp_data.get("total_years_of_experience"),
+        "number_of_companies":       exp_data.get("number_of_companies"),
+        "current_company":           exp_data.get("current_company"),
+        "current_designation":       exp_data.get("current_designation"),
+        "current_ctc":               exp_data.get("current_ctc"),
+        "expected_ctc":              exp_data.get("expected_ctc"),
+        "notice_period":             exp_data.get("notice_period"),
+        "current_employment_status": exp_data.get("current_employment_status"),
+        "industry":                  exp_data.get("industry"),
+        "preferred_location":        exp_data.get("preferred_location"),
+
+        # Education
+        "education":          edu_data.get("education", []),
+        "highest_degree":     edu_data.get("highest_degree"),
+        "qualification_1":    edu_data.get("qualification_1"),
+        "qualification_1_type": edu_data.get("qualification_1_type"),
+        "institute_1":        edu_data.get("institute_1"),
+        "qualification_2":    edu_data.get("qualification_2"),
+        "qualification_2_type": edu_data.get("qualification_2_type"),
+        "institute_2":        edu_data.get("institute_2"),
+        "education_detail":   edu_data.get("education_detail"),
+
+        # Other
+        "projects":           proj_data.get("projects", []),
+        "certifications":     cert_data.get("certifications", []),
+        "awards":             award_data.get("awards", []),
+        "summary":            summary_data.get("summary"),
+        "resume_score":       score,
     }
 
 

@@ -24,6 +24,90 @@ from app.schemas.response import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _to_resume_data(parsed: dict) -> ResumeData:
+    """Convert the parsed dict (with lists) into a flat ResumeData (with strings)."""
+    # Flatten list fields to pipe-delimited strings for the web-app response
+    skills = parsed.get("skills", [])
+    primary_skills = parsed.get("primary_skills", [])
+    technical_skills = parsed.get("technical_skills", [])
+    general_skills = parsed.get("general_skills", [])
+    experience = parsed.get("experience", [])
+    education = parsed.get("education", [])
+    projects = parsed.get("projects", [])
+    certifications = parsed.get("certifications", [])
+    awards = parsed.get("awards", [])
+    score = parsed.get("resume_score", {})
+
+    return ResumeData(
+        first_name=parsed.get("first_name"),
+        last_name=parsed.get("last_name"),
+        name=parsed.get("name"),
+        email=parsed.get("email"),
+        alternate_email=parsed.get("alternate_email"),
+        phone=parsed.get("phone"),
+        number=parsed.get("number"),
+        current_location=parsed.get("current_location"),
+        linkedin_url=parsed.get("linkedin_url"),
+        web_address=parsed.get("web_address"),
+        date_of_birth=parsed.get("date_of_birth"),
+        gender=parsed.get("gender"),
+        nationality=parsed.get("nationality"),
+        father_name=parsed.get("father_name"),
+        mother_name=parsed.get("mother_name"),
+        aadhar_number=parsed.get("aadhar_number"),
+        pan_number=parsed.get("pan_number"),
+        passport_number=parsed.get("passport_number"),
+        blood_group=parsed.get("blood_group"),
+        languages_known=parsed.get("languages_known"),
+        marital_status=parsed.get("marital_status"),
+        skills=", ".join(skills) if skills else None,
+        primary_skills=", ".join(primary_skills) if primary_skills else None,
+        technical_skills=", ".join(technical_skills) if technical_skills else None,
+        general_skills=", ".join(general_skills) if general_skills else None,
+        experience="\n".join(
+            f"{e.get('company','')} | {e.get('title','')} | {e.get('duration','')} | {e.get('description','')}"
+            for e in experience
+        ) if experience else None,
+        total_years_of_experience=parsed.get("total_years_of_experience"),
+        number_of_companies=parsed.get("number_of_companies"),
+        current_company=parsed.get("current_company"),
+        current_designation=parsed.get("current_designation"),
+        current_ctc=parsed.get("current_ctc"),
+        expected_ctc=parsed.get("expected_ctc"),
+        notice_period=parsed.get("notice_period"),
+        current_employment_status=parsed.get("current_employment_status"),
+        industry=parsed.get("industry"),
+        preferred_location=parsed.get("preferred_location"),
+        education="\n".join(
+            f"{e.get('institution','')} | {e.get('degree','')} | {e.get('field_of_study','')} | {e.get('end_year','')} | {e.get('grade','')}"
+            for e in education
+        ) if education else None,
+        highest_degree=parsed.get("highest_degree"),
+        qualification_1=parsed.get("qualification_1"),
+        qualification_1_type=parsed.get("qualification_1_type"),
+        institute_1=parsed.get("institute_1"),
+        qualification_2=parsed.get("qualification_2"),
+        qualification_2_type=parsed.get("qualification_2_type"),
+        institute_2=parsed.get("institute_2"),
+        education_detail=parsed.get("education_detail"),
+        projects="\n".join(
+            f"{p.get('name','')} | {p.get('duration','')} | {p.get('description','')}"
+            for p in projects
+        ) if projects else None,
+        certifications="\n".join(
+            f"{c.get('name','')} | {c.get('issuer','')}"
+            for c in certifications
+        ) if certifications else None,
+        awards="\n".join(
+            f"{a.get('name','')} | {a.get('year','')}"
+            for a in awards
+        ) if awards else None,
+        summary=parsed.get("summary"),
+        overall_score=score.get("overall") if isinstance(score, dict) else None,
+        grade=score.get("grade") if isinstance(score, dict) else None,
+    )
 router = APIRouter(prefix="/api/v1", tags=["parser"])
 
 _BULK_MAX_FILES = 20
@@ -58,7 +142,7 @@ async def parse(file: UploadFile = File(..., description="Resume file (PDF or DO
 
     return ParseResponse(
         success=True,
-        data=ResumeData(**parsed),
+        data=_to_resume_data(parsed),
         processing_time_ms=elapsed_ms,
     )
 
@@ -77,7 +161,7 @@ async def _parse_one(file: UploadFile, semaphore: asyncio.Semaphore) -> BulkPars
         return BulkParseItem(
             filename=filename,
             success=True,
-            data=ResumeData(**parsed),
+            data=_to_resume_data(parsed),
             processing_time_ms=elapsed_ms,
         )
     except Exception as exc:
@@ -227,7 +311,7 @@ async def _run_bulk_job(job_id: str, file_bytes: list[tuple[str, bytes, str]]) -
             elapsed_ms = round((time.time() - start) * 1000, 2)
             return BulkParseItem(
                 filename=filename, success=True,
-                data=ResumeData(**parsed), processing_time_ms=elapsed_ms,
+                data=_to_resume_data(parsed), processing_time_ms=elapsed_ms,
             )
         except Exception as exc:
             elapsed_ms = round((time.time() - start) * 1000, 2)
