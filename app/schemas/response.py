@@ -119,6 +119,9 @@ class ResumeData(BaseModel):
     overall_score: int | None = None
     grade: str | None = None
 
+    # Full raw text extracted from the uploaded resume (PDF/DOCX)
+    resume_text: str | None = None
+
 
 class ParseResponse(BaseModel):
     success: bool
@@ -357,7 +360,7 @@ def _parse_duration_years(duration_str: str | None) -> float | None:
     return float(match.group(1)) if match else None
 
 
-def map_to_salesforce(parsed: dict) -> SalesforceResumeData:
+def map_to_salesforce(parsed: dict, raw_text: str | None = None) -> SalesforceResumeData:
     """Map the internal parsed dict to SalesforceResumeData field names."""
     from datetime import date
 
@@ -503,6 +506,7 @@ def map_to_salesforce(parsed: dict) -> SalesforceResumeData:
         # Resume content
         ResumeRich=resume_rich,
         Resume=resume_text,
+        TextResume=raw_text,
         Date_Parsed_Text=date.today().isoformat(),
 
         # Scoring

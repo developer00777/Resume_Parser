@@ -77,7 +77,7 @@ async def parse_candidate(
     logger.info("Candidate %s — extracted %d chars from %s", record_id, len(text), filename)
 
     parsed = await parse_resume(text)
-    sf_data = map_to_salesforce(parsed)
+    sf_data = map_to_salesforce(parsed, raw_text=text)
     elapsed_ms = round((time.time() - start) * 1000, 2)
 
     return SalesforceParseResponse(success=True, data=sf_data, processing_time_ms=elapsed_ms)
@@ -104,7 +104,7 @@ async def parse_attachment(
     logger.info("Attachment %s — extracted %d chars", attachment_id, len(text))
 
     parsed = await parse_resume(text)
-    sf_data = map_to_salesforce(parsed)
+    sf_data = map_to_salesforce(parsed, raw_text=text)
     elapsed_ms = round((time.time() - start) * 1000, 2)
 
     return SalesforceParseResponse(success=True, data=sf_data, processing_time_ms=elapsed_ms)
@@ -131,7 +131,7 @@ async def parse_url(
     logger.info("URL resume — extracted %d chars from %s", len(text), resume_url)
 
     parsed = await parse_resume(text)
-    sf_data = map_to_salesforce(parsed)
+    sf_data = map_to_salesforce(parsed, raw_text=text)
     elapsed_ms = round((time.time() - start) * 1000, 2)
 
     return SalesforceParseResponse(success=True, data=sf_data, processing_time_ms=elapsed_ms)

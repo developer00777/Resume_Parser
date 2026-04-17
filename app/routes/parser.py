@@ -26,7 +26,7 @@ from app.schemas.response import (
 logger = logging.getLogger(__name__)
 
 
-def _to_resume_data(parsed: dict) -> ResumeData:
+def _to_resume_data(parsed: dict, resume_text: str | None = None) -> ResumeData:
     """Convert the parsed dict (with lists) into a flat ResumeData (with strings)."""
     # Flatten list fields to pipe-delimited strings for the web-app response
     skills = parsed.get("skills", [])
@@ -107,6 +107,7 @@ def _to_resume_data(parsed: dict) -> ResumeData:
         summary=parsed.get("summary"),
         overall_score=score.get("overall") if isinstance(score, dict) else None,
         grade=score.get("grade") if isinstance(score, dict) else None,
+        resume_text=resume_text,
     )
 router = APIRouter(prefix="/api/v1", tags=["parser"])
 
@@ -142,7 +143,7 @@ async def parse(file: UploadFile = File(..., description="Resume file (PDF or DO
 
     return ParseResponse(
         success=True,
-        data=_to_resume_data(parsed),
+        data=_to_resume_data(parsed, resume_text=text),
         processing_time_ms=elapsed_ms,
     )
 
@@ -161,7 +162,7 @@ async def _parse_one(file: UploadFile, semaphore: asyncio.Semaphore) -> BulkPars
         return BulkParseItem(
             filename=filename,
             success=True,
-            data=_to_resume_data(parsed),
+            data=_to_resume_data(parsed, resume_text=text),
             processing_time_ms=elapsed_ms,
         )
     except Exception as exc:
@@ -183,7 +184,7 @@ async def _parse_one_sf(file: UploadFile, semaphore: asyncio.Semaphore) -> BulkS
         async with semaphore:
             text = await extract_text(file)
             parsed = await parse_resume(text)
-        sf_data = map_to_salesforce(parsed)
+        sf_data = map_to_salesforce(parsed, raw_text=text)
         elapsed_ms = round((time.time() - start) * 1000, 2)
         return BulkSalesforceParseItem(
             filename=filename,
@@ -311,7 +312,7 @@ async def _run_bulk_job(job_id: str, file_bytes: list[tuple[str, bytes, str]]) -
             elapsed_ms = round((time.time() - start) * 1000, 2)
             return BulkParseItem(
                 filename=filename, success=True,
-                data=_to_resume_data(parsed), processing_time_ms=elapsed_ms,
+                data=_to_resume_data(parsed, resume_text=text), processing_time_ms=elapsed_ms,
             )
         except Exception as exc:
             elapsed_ms = round((time.time() - start) * 1000, 2)
