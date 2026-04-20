@@ -223,9 +223,11 @@ EXTRACTION RULES:
 - gender: normalise exactly to "Male", "Female", or "Other".
 - aadhar_number: 12 digits, may be written as "XXXX XXXX XXXX".
 - pan_number: exactly 10 alphanumeric characters (e.g. ABCDE1234F).
-- languages_known: look for labels "Languages", "Languages Known", "Language Proficiency". \
-  Extract ONLY spoken/written human languages (e.g. English, Hindi, French). \
-  DO NOT include programming languages (Java, Python, SQL, etc.) here.
+- languages_known: look for labels "Languages Known", "Language Proficiency", \
+  "Languages Spoken", or a "Personal Details" / "Personal Information" section. \
+  Extract ONLY spoken/written human languages (e.g. English, Hindi, Tamil, French). \
+  DO NOT extract programming/scripting languages (Java, Python, SQL, C++, etc.) — \
+  if the only "Languages" entry found is a programming language, return null.
 - marital_status: normalise to one of Single / Married / Divorced / Widowed.
 - DO NOT invent values. If a field is genuinely absent, return null.
 
@@ -302,15 +304,19 @@ EXTRACTION RULES:
 - description: write exactly ONE sentence summarising what the candidate did in that role, \
   based ONLY on what is stated in the text. Do not repeat the company name.
 - total_years_of_experience: \
-  (a) if explicitly stated anywhere in the text (e.g. "5 years of experience", "4.2 years"), \
-      use EXACTLY that number — do not recalculate; \
-  (b) only if NOT explicitly stated, calculate from the earliest start date to the most \
-      recent end date (use 2024 as "present"); round to 1 decimal place. \
-  IMPORTANT: never count client/project durations that overlap with a single employer role \
-  as separate tenures — only count distinct employer periods.
-- number_of_companies: count of distinct EMPLOYERS only — companies the candidate \
-  was directly employed by. Do NOT count clients, end-clients, or project clients \
-  (e.g. if someone worked at Infosys on a project for Citibank, count only Infosys).
+  RULE 1 (highest priority): scan the text for any phrase like "X years of experience", \
+  "X+ years", "over X years", "X.X years of professional experience". If found, use \
+  EXACTLY that number as a float (e.g. "5 years" → 5.0, "4.2 years" → 4.2). \
+  RULE 2 (only if no explicit statement found): calculate from the earliest employer \
+  start date to the latest end date (treat "till date"/"present"/"current" as 2024); \
+  round to 1 decimal place. \
+  DO NOT add up project durations or client engagement periods — use employer tenures only.
+- number_of_companies: count ONLY the companies listed under "Work Experience", \
+  "Employment History", or "Organization" fields where the candidate held a direct \
+  employment role (with a Designation/Title). Do NOT count "Client" fields, \
+  end-clients, or project clients — those are NOT employers. \
+  Example: if the resume lists Organization=Infosys and Client=Citibank under a project, \
+  count only Infosys.
 - current_employment_status: infer "Employed" if the latest role says "Present" or "Current"; \
   "Unemployed" if all roles have end dates in the past; "Freelancer" if stated.
 - current_ctc / expected_ctc: look for labels "CTC", "Current CTC", "Salary", \
