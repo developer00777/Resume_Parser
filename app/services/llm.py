@@ -223,7 +223,9 @@ EXTRACTION RULES:
 - gender: normalise exactly to "Male", "Female", or "Other".
 - aadhar_number: 12 digits, may be written as "XXXX XXXX XXXX".
 - pan_number: exactly 10 alphanumeric characters (e.g. ABCDE1234F).
-- languages_known: look for labels "Languages", "Languages Known", "Language Proficiency".
+- languages_known: look for labels "Languages", "Languages Known", "Language Proficiency". \
+  Extract ONLY spoken/written human languages (e.g. English, Hindi, French). \
+  DO NOT include programming languages (Java, Python, SQL, etc.) here.
 - marital_status: normalise to one of Single / Married / Divorced / Widowed.
 - DO NOT invent values. If a field is genuinely absent, return null.
 
@@ -300,10 +302,15 @@ EXTRACTION RULES:
 - description: write exactly ONE sentence summarising what the candidate did in that role, \
   based ONLY on what is stated in the text. Do not repeat the company name.
 - total_years_of_experience: \
-  (a) if explicitly stated (e.g. "8+ years of experience"), use that number; \
-  (b) otherwise calculate from the earliest start date to the most recent end date \
-      (or today if still employed); round to 1 decimal place.
-- number_of_companies: count of distinct employers (not number of roles).
+  (a) if explicitly stated anywhere in the text (e.g. "5 years of experience", "4.2 years"), \
+      use EXACTLY that number — do not recalculate; \
+  (b) only if NOT explicitly stated, calculate from the earliest start date to the most \
+      recent end date (use 2024 as "present"); round to 1 decimal place. \
+  IMPORTANT: never count client/project durations that overlap with a single employer role \
+  as separate tenures — only count distinct employer periods.
+- number_of_companies: count of distinct EMPLOYERS only — companies the candidate \
+  was directly employed by. Do NOT count clients, end-clients, or project clients \
+  (e.g. if someone worked at Infosys on a project for Citibank, count only Infosys).
 - current_employment_status: infer "Employed" if the latest role says "Present" or "Current"; \
   "Unemployed" if all roles have end dates in the past; "Freelancer" if stated.
 - current_ctc / expected_ctc: look for labels "CTC", "Current CTC", "Salary", \
