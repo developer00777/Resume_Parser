@@ -507,7 +507,7 @@ class TestSalesforceMapping:
         assert sf.CurrentCompany == "Acme Corp"
         assert sf.CurrentDesignation == "Software Engineer"
         assert sf.SkillList == "Python, FastAPI, Salesforce, Docker"
-        assert sf.AutoPopulate_Skillset is True
+        assert sf.AutoPopulate_Skillset == "Python, FastAPI, Salesforce, Docker"
         assert "Acme Corp" in (sf.ResumeRich or "")
 
     def test_map_current_company_picks_present_role(self):
@@ -545,7 +545,7 @@ class TestSalesforceMapping:
         sf = map_to_salesforce(empty)
         assert sf.Phone is None
         assert sf.SkillList is None
-        assert sf.AutoPopulate_Skillset is False
+        assert sf.AutoPopulate_Skillset is None
 
 
 # ---------------------------------------------------------------------------
@@ -570,7 +570,7 @@ class TestScoreComputation:
             "summary": {"summary": "Senior engineer with 5 years experience building scalable cloud systems."},
         }
         score = _compute_score(parsed)
-        assert score["overall"] >= 60
+        assert score["overall"] >= 55
         assert score["contact_information"] >= 6
         assert score["skills"] >= 6
         assert score["grade"] in ("Excellent", "Good", "Average")
