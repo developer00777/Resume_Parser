@@ -141,11 +141,13 @@ class TestAuth:
 # ---------------------------------------------------------------------------
 
 class TestParseEndpoint:
-    def _post_pdf(self, pdf_bytes: bytes = MINIMAL_PDF):
+    def _post_pdf(self, pdf_bytes: bytes = None):
+        if pdf_bytes is None:
+            pdf_bytes = MINIMAL_PDF
         return client.post(
             "/api/v1/parse",
             headers={"X-API-Key": VALID_API_KEY},
-            files={"file": ("resume.pdf", io.BytesIO(pdf_bytes), "application/pdf")},
+            files=[("files", ("resume.pdf", io.BytesIO(pdf_bytes), "application/pdf"))],
         )
 
     def test_parse_returns_200_with_mocked_llm(self):
@@ -160,18 +162,22 @@ class TestParseEndpoint:
         assert resp.status_code == 200
         body = resp.json()
         assert body["success"] is True
-        assert body["data"]["name"] == "Jane Doe"
-        assert body["data"]["email"] == "jane@example.com"
-        assert "Python" in body["data"]["skills"]
-        assert "processing_time_ms" in body
+        assert body["total"] == 1
+        assert body["results"][0]["data"]["name"] == "Jane Doe"
+        assert body["results"][0]["data"]["email"] == "jane@example.com"
+        assert "Python" in body["results"][0]["data"]["skills"]
+        assert "total_processing_time_ms" in body
 
     def test_parse_wrong_file_type_returns_400(self):
         resp = client.post(
             "/api/v1/parse",
             headers={"X-API-Key": VALID_API_KEY},
-            files={"file": ("resume.txt", io.BytesIO(b"hello"), "text/plain")},
+            files=[("files", ("resume.txt", io.BytesIO(b"hello"), "text/plain"))],
         )
-        assert resp.status_code == 400
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["results"][0]["success"] is False
+        assert "Unsupported file type" in body["results"][0]["error"]
 
     def test_parse_no_file_returns_422(self):
         resp = client.post(
@@ -190,13 +196,14 @@ class TestParseEndpoint:
             resp = client.post(
                 "/api/v1/parse",
                 headers={"X-API-Key": VALID_API_KEY},
-                files={
-                    "file": (
+                files=[(
+                    "files",
+                    (
                         "resume.docx",
                         io.BytesIO(b"PK fake docx"),
                         "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-                    )
-                },
+                    ),
+                )],
             )
         assert resp.status_code == 200
 
@@ -219,7 +226,7 @@ class TestBulkParseEndpoint:
                 for i in range(3)
             ]
             resp = client.post(
-                "/api/v1/parse-bulk",
+                "/api/v1/parse",
                 headers={"X-API-Key": VALID_API_KEY},
                 files=files,
             )
@@ -239,7 +246,7 @@ class TestBulkParseEndpoint:
             for i in range(21)
         ]
         resp = client.post(
-            "/api/v1/parse-bulk",
+            "/api/v1/parse",
             headers={"X-API-Key": VALID_API_KEY},
             files=files,
         )
@@ -266,7 +273,7 @@ class TestBulkParseEndpoint:
                 for i in range(3)
             ]
             resp = client.post(
-                "/api/v1/parse-bulk",
+                "/api/v1/parse",
                 headers={"X-API-Key": VALID_API_KEY},
                 files=files,
             )
@@ -278,12 +285,12 @@ class TestBulkParseEndpoint:
         assert body["failed"] == 1
 
     def test_bulk_requires_auth(self):
-        resp = client.post("/api/v1/parse-bulk")
+        resp = client.post("/api/v1/parse")
         assert resp.status_code == 401
 
     def test_bulk_no_files_returns_400(self):
         resp = client.post(
-            "/api/v1/parse-bulk",
+            "/api/v1/parse",
             headers={"X-API-Key": VALID_API_KEY},
             files=[("files", ("", io.BytesIO(b""), "application/pdf"))],
         )
@@ -309,7 +316,7 @@ class TestBulkSalesforceParseEndpoint:
                 for i in range(2)
             ]
             resp = client.post(
-                "/api/v1/parse-bulk/salesforce",
+                "/api/v1/parse/salesforce",
                 headers={"X-API-Key": VALID_API_KEY},
                 files=files,
             )
@@ -332,14 +339,14 @@ class TestBulkSalesforceParseEndpoint:
             for i in range(21)
         ]
         resp = client.post(
-            "/api/v1/parse-bulk/salesforce",
+            "/api/v1/parse/salesforce",
             headers={"X-API-Key": VALID_API_KEY},
             files=files,
         )
         assert resp.status_code == 400
 
     def test_bulk_salesforce_requires_auth(self):
-        resp = client.post("/api/v1/parse-bulk/salesforce")
+        resp = client.post("/api/v1/parse/salesforce")
         assert resp.status_code == 401
 
 
@@ -360,7 +367,7 @@ class TestBulkJobEndpoints:
                 ("files", ("resume.pdf", io.BytesIO(MINIMAL_PDF), "application/pdf"))
             ]
             resp = client.post(
-                "/api/v1/parse-bulk/job",
+                "/api/v1/parse/job",
                 headers={"X-API-Key": VALID_API_KEY},
                 files=files,
             )
@@ -373,7 +380,7 @@ class TestBulkJobEndpoints:
 
     def test_get_job_not_found_returns_404(self):
         resp = client.get(
-            "/api/v1/parse-bulk/job/nonexistent-job-id",
+            "/api/v1/parse/job/nonexistent-job-id",
             headers={"X-API-Key": VALID_API_KEY},
         )
         assert resp.status_code == 404
@@ -390,7 +397,7 @@ class TestBulkJobEndpoints:
                 ("files", ("resume.pdf", io.BytesIO(MINIMAL_PDF), "application/pdf"))
             ]
             submit_resp = client.post(
-                "/api/v1/parse-bulk/job",
+                "/api/v1/parse/job",
                 headers={"X-API-Key": VALID_API_KEY},
                 files=files,
             )
@@ -398,7 +405,7 @@ class TestBulkJobEndpoints:
         job_id = submit_resp.json()["job_id"]
 
         poll_resp = client.get(
-            f"/api/v1/parse-bulk/job/{job_id}",
+            f"/api/v1/parse/job/{job_id}",
             headers={"X-API-Key": VALID_API_KEY},
         )
         assert poll_resp.status_code == 200
@@ -407,7 +414,7 @@ class TestBulkJobEndpoints:
         assert body["status"] in ("processing", "completed", "failed")
 
     def test_job_requires_auth(self):
-        resp = client.post("/api/v1/parse-bulk/job")
+        resp = client.post("/api/v1/parse/job")
         assert resp.status_code == 401
 
 

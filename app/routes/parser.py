@@ -10,7 +10,6 @@ from app.config import settings
 from app.services.document import extract_text
 from app.services.llm import parse_resume
 from app.schemas.response import (
-    ParseResponse,
     ResumeData,
     BulkParseResponse,
     BulkParseItem,
@@ -130,24 +129,6 @@ async def get_models():
     )
 
 
-@router.post("/parse", response_model=ParseResponse)
-async def parse(file: UploadFile = File(..., description="Resume file (PDF or DOCX)")):
-    """Parse an uploaded resume and extract structured fields."""
-    start = time.time()
-
-    text = await extract_text(file)
-    logger.info(f"Extracted {len(text)} chars from {file.filename}")
-
-    parsed = await parse_resume(text)
-    elapsed_ms = round((time.time() - start) * 1000, 2)
-
-    return ParseResponse(
-        success=True,
-        data=_to_resume_data(parsed, resume_text=text),
-        processing_time_ms=elapsed_ms,
-    )
-
-
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 async def _parse_one(file: UploadFile, semaphore: asyncio.Semaphore) -> BulkParseItem:
@@ -167,7 +148,7 @@ async def _parse_one(file: UploadFile, semaphore: asyncio.Semaphore) -> BulkPars
         )
     except Exception as exc:
         elapsed_ms = round((time.time() - start) * 1000, 2)
-        logger.error(f"Bulk: failed to parse '{filename}': {exc}")
+        logger.error(f"Failed to parse '{filename}': {exc}")
         return BulkParseItem(
             filename=filename,
             success=False,
@@ -177,7 +158,7 @@ async def _parse_one(file: UploadFile, semaphore: asyncio.Semaphore) -> BulkPars
 
 
 async def _parse_one_sf(file: UploadFile, semaphore: asyncio.Semaphore) -> BulkSalesforceParseItem:
-    """Parse a single resume and return a Salesforce-mapped BulkSalesforceParseItem (never raises)."""
+    """Parse a single resume and return a Salesforce-mapped item (never raises)."""
     start = time.time()
     filename = file.filename or "unknown"
     try:
@@ -203,7 +184,7 @@ async def _parse_one_sf(file: UploadFile, semaphore: asyncio.Semaphore) -> BulkS
         )
 
 
-def _validate_bulk_files(files: list[UploadFile]) -> None:
+def _validate_files(files: list[UploadFile]) -> None:
     if not files:
         raise HTTPException(status_code=400, detail="No files provided.")
     if len(files) > _BULK_MAX_FILES:
@@ -213,20 +194,20 @@ def _validate_bulk_files(files: list[UploadFile]) -> None:
         )
 
 
-# ── Synchronous bulk endpoints ────────────────────────────────────────────────
+# ── Single unified parse endpoint (1–15 files) ───────────────────────────────
 
-@router.post("/parse-bulk", response_model=BulkParseResponse)
-async def parse_bulk(
-    files: List[UploadFile] = File(..., description="Up to 15 resume files (PDF or DOCX)"),
+@router.post("/parse", response_model=BulkParseResponse)
+async def parse(
+    files: List[UploadFile] = File(..., description="1 to 15 resume files (PDF or DOCX)"),
 ):
     """
-    Parse up to 15 resume files in a single request.
+    Parse 1 to 15 resume files in a single request.
 
-    All resumes are processed concurrently (max 5 at a time). The total
-    request completes within ~110 seconds (Salesforce async callout limit).
-    Returns generic JSON for each file.
+    Send one file for a single resume or up to 15 files for bulk parsing.
+    All files are processed concurrently (max 5 at a time).
+    Each result is under `results[]` with filename, success flag, and parsed data.
     """
-    _validate_bulk_files(files)
+    _validate_files(files)
     wall_start = time.time()
     semaphore = asyncio.Semaphore(_BULK_CONCURRENCY)
 
@@ -238,8 +219,7 @@ async def parse_bulk(
     except asyncio.TimeoutError:
         raise HTTPException(
             status_code=504,
-            detail=f"Bulk parsing exceeded the {_BULK_TIMEOUT}s time limit. "
-                   "Try fewer files or smaller documents.",
+            detail=f"Parsing exceeded the {_BULK_TIMEOUT}s time limit. Try fewer or smaller files.",
         )
 
     total_ms = round((time.time() - wall_start) * 1000, 2)
@@ -255,8 +235,8 @@ async def parse_bulk(
     )
 
 
-@router.post("/parse-bulk/salesforce", response_model=BulkSalesforceParseResponse)
-async def parse_bulk_salesforce(
+@router.post("/parse/salesforce", response_model=BulkSalesforceParseResponse)
+async def parse_salesforce(
     files: List[UploadFile] = File(..., description="Up to 15 resume files (PDF or DOCX)"),
 ):
     """
@@ -265,7 +245,7 @@ async def parse_bulk_salesforce(
     Same concurrency and timeout rules as /parse-bulk.
     Use this endpoint when feeding results directly into Salesforce SCSCHAMPS fields.
     """
-    _validate_bulk_files(files)
+    _validate_files(files)
     wall_start = time.time()
     semaphore = asyncio.Semaphore(_BULK_CONCURRENCY)
 
@@ -277,8 +257,7 @@ async def parse_bulk_salesforce(
     except asyncio.TimeoutError:
         raise HTTPException(
             status_code=504,
-            detail=f"Bulk parsing exceeded the {_BULK_TIMEOUT}s time limit. "
-                   "Try fewer files or smaller documents.",
+            detail=f"Parsing exceeded the {_BULK_TIMEOUT}s time limit. Try fewer or smaller files.",
         )
 
     total_ms = round((time.time() - wall_start) * 1000, 2)
@@ -343,18 +322,18 @@ async def _run_bulk_job(job_id: str, file_bytes: list[tuple[str, bytes, str]]) -
         job.error = str(exc)
 
 
-@router.post("/parse-bulk/job", response_model=BulkJobStatus, status_code=202)
+@router.post("/parse/job", response_model=BulkJobStatus, status_code=202)
 async def submit_bulk_job(
-    files: List[UploadFile] = File(..., description="Up to 15 resume files (PDF or DOCX)"),
+    files: List[UploadFile] = File(..., description="1 to 15 resume files (PDF or DOCX)"),
 ):
     """
-    Submit a bulk parse job and get back a job_id immediately (HTTP 202).
+    Submit a parse job and get back a job_id immediately (HTTP 202).
 
-    Poll GET /api/v1/parse-bulk/job/{job_id} to check status.
+    Poll GET /api/v1/parse/job/{job_id} to check status.
     Use this when you can't wait for a synchronous response (e.g. Salesforce
     async callouts with a 120-second limit but many large files).
     """
-    _validate_bulk_files(files)
+    _validate_files(files)
 
     # Read all file bytes eagerly before the background task starts
     # (UploadFile streams are not safe to read after the request scope ends)
@@ -373,7 +352,7 @@ async def submit_bulk_job(
     return job
 
 
-@router.get("/parse-bulk/job/{job_id}", response_model=BulkJobStatus)
+@router.get("/parse/job/{job_id}", response_model=BulkJobStatus)
 async def get_bulk_job(job_id: str):
     """
     Poll the status of a bulk parse job.
