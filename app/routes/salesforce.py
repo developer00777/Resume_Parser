@@ -1,25 +1,24 @@
 """
 Salesforce-specific routes.
 
-POST /api/v1/salesforce/parse-candidate
-    Accepts a Salesforce Candidate record ID, fetches the resume file from
-    Salesforce (via OAuth2), parses it, and returns a SCSCHAMPS-mapped JSON
-    response ready to write back to Salesforce.
+Single-record endpoints:
+  POST /api/v1/salesforce/parse-candidate   — one Candidate record ID
+  POST /api/v1/salesforce/parse-attachment  — one ContentVersion/Attachment ID
+  POST /api/v1/salesforce/parse-url         — one resume URL
 
-POST /api/v1/salesforce/parse-attachment
-    Accepts a raw Salesforce ContentVersion / Attachment ID and an optional
-    filename, downloads the file, and returns the SCSCHAMPS-mapped result.
-
-POST /api/v1/salesforce/parse-url
-    Accepts a resume URL (absolute or Salesforce-relative) and returns the
-    SCSCHAMPS-mapped result.
+Bulk endpoints (1–15 records, parallel):
+  POST /api/v1/salesforce/parse-candidates  — list of Candidate record IDs
+  POST /api/v1/salesforce/parse-attachments — list of ContentVersion/Attachment IDs
+  POST /api/v1/salesforce/parse-urls        — list of resume URLs
 """
-import io
+import asyncio
 import time
 import logging
 from tempfile import SpooledTemporaryFile
+from typing import List
 
-from fastapi import APIRouter, Query
+from fastapi import APIRouter, Query, HTTPException
+from pydantic import BaseModel
 from starlette.datastructures import Headers, UploadFile
 
 from app.services.document import extract_text
@@ -29,10 +28,40 @@ from app.services.salesforce import (
     fetch_resume_by_attachment_id,
     fetch_resume_by_url,
 )
-from app.schemas.response import SalesforceParseResponse, map_to_salesforce
+from app.schemas.response import (
+    SalesforceParseResponse,
+    BulkSalesforceParseResponse,
+    BulkSalesforceParseItem,
+    map_to_salesforce,
+)
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/v1/salesforce", tags=["salesforce"])
+
+_BULK_MAX = 15
+_BULK_CONCURRENCY = 5
+_BULK_TIMEOUT = 110.0
+
+
+class BulkCandidateRequest(BaseModel):
+    record_ids: List[str]
+
+
+class BulkAttachmentRequest(BaseModel):
+    attachment_ids: List[str]
+    filename: str = "resume.pdf"
+
+
+class BulkUrlRequest(BaseModel):
+    resume_urls: List[str]
+    filename: str = "resume.pdf"
+
+
+def _validate_bulk(items: list) -> None:
+    if not items:
+        raise HTTPException(status_code=400, detail="No IDs provided.")
+    if len(items) > _BULK_MAX:
+        raise HTTPException(status_code=400, detail=f"Maximum {_BULK_MAX} records per request.")
 
 
 # ---------------------------------------------------------------------------
@@ -135,3 +164,137 @@ async def parse_url(
     elapsed_ms = round((time.time() - start) * 1000, 2)
 
     return SalesforceParseResponse(success=True, data=sf_data, processing_time_ms=elapsed_ms)
+
+
+# ---------------------------------------------------------------------------
+# Bulk endpoints
+# ---------------------------------------------------------------------------
+
+async def _parse_candidate(record_id: str, semaphore: asyncio.Semaphore) -> BulkSalesforceParseItem:
+    start = time.time()
+    try:
+        async with semaphore:
+            content, filename = await fetch_resume_from_candidate(record_id)
+            upload = _bytes_to_upload(content, filename)
+            text = await extract_text(upload)
+            parsed = await parse_resume(text)
+        sf_data = map_to_salesforce(parsed, raw_text=text)
+        return BulkSalesforceParseItem(
+            filename=record_id, success=True, data=sf_data,
+            processing_time_ms=round((time.time() - start) * 1000, 2),
+        )
+    except Exception as exc:
+        logger.error(f"Bulk candidate '{record_id}' failed: {exc}")
+        return BulkSalesforceParseItem(
+            filename=record_id, success=False, error=str(exc),
+            processing_time_ms=round((time.time() - start) * 1000, 2),
+        )
+
+
+async def _parse_attachment_bulk(attachment_id: str, filename: str, semaphore: asyncio.Semaphore) -> BulkSalesforceParseItem:
+    start = time.time()
+    try:
+        async with semaphore:
+            content, resolved_filename = await fetch_resume_by_attachment_id(attachment_id)
+            if resolved_filename == attachment_id + ".pdf" and not filename.endswith(".pdf"):
+                resolved_filename = filename
+            upload = _bytes_to_upload(content, resolved_filename)
+            text = await extract_text(upload)
+            parsed = await parse_resume(text)
+        sf_data = map_to_salesforce(parsed, raw_text=text)
+        return BulkSalesforceParseItem(
+            filename=attachment_id, success=True, data=sf_data,
+            processing_time_ms=round((time.time() - start) * 1000, 2),
+        )
+    except Exception as exc:
+        logger.error(f"Bulk attachment '{attachment_id}' failed: {exc}")
+        return BulkSalesforceParseItem(
+            filename=attachment_id, success=False, error=str(exc),
+            processing_time_ms=round((time.time() - start) * 1000, 2),
+        )
+
+
+async def _parse_url_bulk(resume_url: str, filename: str, semaphore: asyncio.Semaphore) -> BulkSalesforceParseItem:
+    start = time.time()
+    try:
+        async with semaphore:
+            content, resolved_filename = await fetch_resume_by_url(resume_url)
+            if not resolved_filename.endswith(".pdf") and filename:
+                resolved_filename = filename
+            upload = _bytes_to_upload(content, resolved_filename)
+            text = await extract_text(upload)
+            parsed = await parse_resume(text)
+        sf_data = map_to_salesforce(parsed, raw_text=text)
+        return BulkSalesforceParseItem(
+            filename=resume_url, success=True, data=sf_data,
+            processing_time_ms=round((time.time() - start) * 1000, 2),
+        )
+    except Exception as exc:
+        logger.error(f"Bulk URL '{resume_url}' failed: {exc}")
+        return BulkSalesforceParseItem(
+            filename=resume_url, success=False, error=str(exc),
+            processing_time_ms=round((time.time() - start) * 1000, 2),
+        )
+
+
+@router.post("/parse-candidates", response_model=BulkSalesforceParseResponse)
+async def parse_candidates(body: BulkCandidateRequest):
+    """Parse 1–15 Salesforce Candidate records in parallel. Pass record IDs in the request body."""
+    _validate_bulk(body.record_ids)
+    wall_start = time.time()
+    semaphore = asyncio.Semaphore(_BULK_CONCURRENCY)
+    try:
+        results = await asyncio.wait_for(
+            asyncio.gather(*[_parse_candidate(rid, semaphore) for rid in body.record_ids]),
+            timeout=_BULK_TIMEOUT,
+        )
+    except asyncio.TimeoutError:
+        raise HTTPException(status_code=504, detail=f"Parsing exceeded {_BULK_TIMEOUT}s. Try fewer records.")
+    parsed_count = sum(1 for r in results if r.success)
+    return BulkSalesforceParseResponse(
+        success=True, total=len(results), parsed=parsed_count,
+        failed=len(results) - parsed_count, results=list(results),
+        total_processing_time_ms=round((time.time() - wall_start) * 1000, 2),
+    )
+
+
+@router.post("/parse-attachments", response_model=BulkSalesforceParseResponse)
+async def parse_attachments(body: BulkAttachmentRequest):
+    """Parse 1–15 Salesforce ContentVersion/Attachment IDs in parallel."""
+    _validate_bulk(body.attachment_ids)
+    wall_start = time.time()
+    semaphore = asyncio.Semaphore(_BULK_CONCURRENCY)
+    try:
+        results = await asyncio.wait_for(
+            asyncio.gather(*[_parse_attachment_bulk(aid, body.filename, semaphore) for aid in body.attachment_ids]),
+            timeout=_BULK_TIMEOUT,
+        )
+    except asyncio.TimeoutError:
+        raise HTTPException(status_code=504, detail=f"Parsing exceeded {_BULK_TIMEOUT}s. Try fewer records.")
+    parsed_count = sum(1 for r in results if r.success)
+    return BulkSalesforceParseResponse(
+        success=True, total=len(results), parsed=parsed_count,
+        failed=len(results) - parsed_count, results=list(results),
+        total_processing_time_ms=round((time.time() - wall_start) * 1000, 2),
+    )
+
+
+@router.post("/parse-urls", response_model=BulkSalesforceParseResponse)
+async def parse_urls(body: BulkUrlRequest):
+    """Parse 1–15 resume URLs in parallel."""
+    _validate_bulk(body.resume_urls)
+    wall_start = time.time()
+    semaphore = asyncio.Semaphore(_BULK_CONCURRENCY)
+    try:
+        results = await asyncio.wait_for(
+            asyncio.gather(*[_parse_url_bulk(url, body.filename, semaphore) for url in body.resume_urls]),
+            timeout=_BULK_TIMEOUT,
+        )
+    except asyncio.TimeoutError:
+        raise HTTPException(status_code=504, detail=f"Parsing exceeded {_BULK_TIMEOUT}s. Try fewer records.")
+    parsed_count = sum(1 for r in results if r.success)
+    return BulkSalesforceParseResponse(
+        success=True, total=len(results), parsed=parsed_count,
+        failed=len(results) - parsed_count, results=list(results),
+        total_processing_time_ms=round((time.time() - wall_start) * 1000, 2),
+    )
