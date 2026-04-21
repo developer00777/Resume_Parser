@@ -1,3 +1,4 @@
+import base64
 import io
 import logging
 
@@ -13,6 +14,10 @@ ALLOWED_CONTENT_TYPES = {
     "application/pdf": "pdf",
     "application/vnd.openxmlformats-officedocument.wordprocessingml.document": "docx",
 }
+
+# Minimum characters from PyPDF extraction to consider the PDF text-based.
+# Below this threshold the PDF is treated as image-based and OCR is triggered.
+_OCR_THRESHOLD = 100
 
 
 def validate_file(file: UploadFile) -> str:
@@ -38,11 +43,11 @@ async def extract_text(file: UploadFile) -> str:
         )
 
     if file_type == "pdf":
-        return _extract_pdf(content)
+        return await _extract_pdf(content)
     return _extract_docx(content)
 
 
-def validate_file_bytes(filename: str, content: bytes, content_type: str) -> str:
+async def validate_file_bytes(filename: str, content: bytes, content_type: str) -> str:
     """Extract text from raw bytes (used by background job tasks)."""
     if content_type not in ALLOWED_CONTENT_TYPES:
         raise HTTPException(
@@ -56,18 +61,75 @@ def validate_file_bytes(filename: str, content: bytes, content_type: str) -> str
         )
     file_type = ALLOWED_CONTENT_TYPES[content_type]
     if file_type == "pdf":
-        return _extract_pdf(content)
+        return await _extract_pdf(content)
     return _extract_docx(content)
 
 
-def _extract_pdf(content: bytes) -> str:
+async def _ocr_pdf_via_vision(content: bytes) -> str:
+    """
+    OCR fallback for image-based PDFs.
+
+    Sends the raw PDF as a base64 data URL to gpt-4o-mini via OpenRouter.
+    No system dependencies required — reuses the existing OpenRouter HTTP client.
+    Triggered only when PyPDF extracts fewer than _OCR_THRESHOLD characters.
+    """
+    from app.services.llm import _get_client
+
+    logger.info("OCR fallback triggered — PDF appears image-based, sending to vision model")
+
+    b64 = base64.b64encode(content).decode()
+    data_url = f"data:application/pdf;base64,{b64}"
+
+    client = _get_client()
+    try:
+        response = await client.post(
+            "/chat/completions",
+            json={
+                "model": settings.openrouter_model,
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "text",
+                                "text": (
+                                    "This is a scanned resume PDF. Extract ALL text exactly as it appears. "
+                                    "Preserve names, dates, companies, job titles, skills, education, and all other details. "
+                                    "Output plain text only — no commentary, no markdown, no JSON."
+                                ),
+                            },
+                            {
+                                "type": "file",
+                                "file": {"url": data_url},
+                            },
+                        ],
+                    }
+                ],
+                "max_tokens": 3000,
+                "temperature": 0.0,
+            },
+        )
+        response.raise_for_status()
+    except Exception as e:
+        logger.error(f"OCR vision call failed: {e}")
+        raise HTTPException(
+            status_code=422,
+            detail="Could not extract text from PDF. The file appears image-based and OCR also failed.",
+        )
+
+    text = response.json()["choices"][0]["message"]["content"]
+    logger.info(f"OCR extracted {len(text)} chars from image-based PDF")
+    return text
+
+
+async def _extract_pdf(content: bytes) -> str:
     """
     Extract text from PDF bytes.
 
     Strategy:
-    - Uses PyPDF's layout-aware extraction (extract_text with layout mode) when
-      available; falls back to simple extraction.
-    - Joins pages with double newlines to preserve section boundaries.
+    1. PyPDF text extraction (fast, free, works for all text-based PDFs).
+    2. If extracted text is below _OCR_THRESHOLD chars, the PDF is likely
+       image-based — fall back to gpt-4o-mini vision OCR via OpenRouter.
     """
     try:
         reader = PdfReader(io.BytesIO(content))
@@ -80,11 +142,14 @@ def _extract_pdf(content: bytes) -> str:
                 pages.append(text.strip())
 
         text = "\n\n".join(pages)
-        if not text.strip():
-            raise HTTPException(
-                status_code=422,
-                detail="Could not extract text from PDF. The file may be image-based or empty.",
+
+        if len(text.strip()) < _OCR_THRESHOLD:
+            # Image-based PDF — PyPDF found no usable text layer.
+            logger.warning(
+                f"PyPDF extracted only {len(text.strip())} chars — triggering OCR fallback"
             )
+            return await _ocr_pdf_via_vision(content)
+
         return text
     except HTTPException:
         raise

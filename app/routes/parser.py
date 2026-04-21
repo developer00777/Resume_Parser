@@ -307,7 +307,7 @@ async def _run_bulk_job(job_id: str, file_bytes: list[tuple[str, bytes, str]]) -
         try:
             async with semaphore:
                 from app.services.document import validate_file_bytes
-                text = validate_file_bytes(filename, content, content_type)
+                text = await validate_file_bytes(filename, content, content_type)
                 parsed = await parse_resume(text)
             elapsed_ms = round((time.time() - start) * 1000, 2)
             return BulkParseItem(

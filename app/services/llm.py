@@ -161,25 +161,54 @@ def _normalise_text(raw: str) -> str:
 #      closest to the resume header (top of document).
 # ---------------------------------------------------------------------------
 
-PROMPT_CONTACT = """\
+PROMPT_CHUNK_A = """\
 You are an expert resume parser. Read the complete resume text below and extract \
-ONLY the candidate's contact and identity information.
+contact information, personal/biographical details, and professional metadata. \
+Return ALL three sections in a single JSON object.
 
 OUTPUT FORMAT — return ONLY a single valid JSON object, no other text:
 {
-  "first_name": "<given/first name only, or null>",
-  "last_name": "<family/surname only, or null>",
-  "full_name": "<complete name as written, or null>",
-  "email": "<primary email — must contain @, or null>",
-  "alternate_email": "<second email if present, else null>",
-  "phone": "<primary phone number with country code if shown, or null>",
-  "alternate_phone": "<second/alternate phone number, or null>",
-  "current_location": "<city and state/country as written, or null>",
-  "linkedin_url": "<full LinkedIn profile URL — must contain 'linkedin.com', or null>",
-  "web_address": "<personal website, portfolio, or GitHub URL — NOT LinkedIn, or null>"
+  "contact": {
+    "first_name": "<given/first name only, or null>",
+    "last_name": "<family/surname only, or null>",
+    "full_name": "<complete name as written, or null>",
+    "email": "<primary email — must contain @, or null>",
+    "alternate_email": "<second email if present, else null>",
+    "phone": "<primary phone number with country code if shown, or null>",
+    "alternate_phone": "<second/alternate phone number, or null>",
+    "current_location": "<city and state/country as written, or null>",
+    "linkedin_url": "<full LinkedIn profile URL — must contain 'linkedin.com', or null>",
+    "web_address": "<personal website, portfolio, or GitHub URL — NOT LinkedIn, or null>"
+  },
+  "personal": {
+    "date_of_birth": "<YYYY-MM-DD, or null>",
+    "gender": "<Male | Female | Other, or null>",
+    "nationality": "<nationality or null>",
+    "father_name": "<father's full name or null>",
+    "mother_name": "<mother's full name or null>",
+    "aadhar_number": "<12-digit Aadhar number or null>",
+    "pan_number": "<10-char PAN number or null>",
+    "passport_number": "<passport ID or null>",
+    "blood_group": "<e.g. O+, A-, AB+, or null>",
+    "languages_known": "<comma-separated human language list or null>",
+    "marital_status": "<Single | Married | Divorced | Widowed or null>"
+  },
+  "professional_meta": {
+    "current_ctc": "<current salary/CTC exactly as written e.g. '12 LPA', '₹15,00,000 p.a.', or null>",
+    "expected_ctc": "<expected salary/CTC exactly as written, or null>",
+    "notice_period": "<notice period exactly as written e.g. '30 days', '2 months', 'Immediate', or null>",
+    "industry": "<primary industry or domain e.g. 'Information Technology', 'Finance', 'Healthcare', or null>",
+    "preferred_location": "<preferred work location as written, or null>",
+    "marital_status": "<Single | Married | Divorced | Widowed, or null>",
+    "languages_known": "<comma-separated language list, or null>",
+    "nationality": "<nationality, or null>",
+    "blood_group": "<e.g. O+, A-, AB+, or null>",
+    "gender": "<Male | Female | Other, or null>",
+    "date_of_birth": "<YYYY-MM-DD, or null>"
+  }
 }
 
-EXTRACTION RULES:
+EXTRACTION RULES — contact:
 - Scan the ENTIRE text; contact details may appear at the top, bottom, header, or sidebar.
 - first_name / last_name: split the candidate's own name (not any employer's name).
 - full_name: the candidate's complete name exactly as written (not a company name).
@@ -190,109 +219,170 @@ EXTRACTION RULES:
   "Residing at", "Place". If the value is "Open to relocate" or "Anywhere", return null.
 - linkedin_url: extract the full URL starting with http or linkedin.com/in/…
 - web_address: GitHub, portfolio, personal site — NOT the LinkedIn URL.
+
+EXTRACTION RULES — personal:
+- Personal details often appear in a "Personal Details", "Personal Information", \
+  "Bio-Data", or "Declaration" section, but may also appear in a sidebar or footer.
+- date_of_birth: convert any date format to YYYY-MM-DD. Labels: "DOB", "Date of Birth", "Born on".
+- gender: normalise exactly to "Male", "Female", or "Other".
+- aadhar_number: 12 digits, may be written as "XXXX XXXX XXXX".
+- pan_number: exactly 10 alphanumeric characters (e.g. ABCDE1234F).
+- languages_known: Extract ONLY spoken/written human languages (e.g. English, Hindi, Tamil, French). \
+  DO NOT extract programming/scripting languages (Java, Python, SQL, C++, etc.).
+- marital_status: normalise to one of Single / Married / Divorced / Widowed.
+
+EXTRACTION RULES — professional_meta:
+- Scan the ENTIRE text including headers, footers, sidebars, and personal detail sections.
+- current_ctc: look for "Current CTC", "CTC", "Current Salary", "Present Salary", "Package".
+- expected_ctc: look for "Expected CTC", "Expected Salary", "Desired CTC", "Salary Expectation".
+- notice_period: look for "Notice Period", "Availability", "Joining Time", "Can join in".
+- industry: infer from job titles and companies if not explicitly stated.
+- preferred_location: look for "Preferred Location", "Location Preference", "Open to relocation".
+
+GENERAL RULES:
 - DO NOT invent, guess, or infer any value. If a field is not in the text, return null.
 
 Resume text (complete):
 """
 
-PROMPT_PERSONAL = """\
+PROMPT_CHUNK_B = """\
 You are an expert resume parser. Read the complete resume text below and extract \
-ONLY personal/biographical details.
+skills, certifications, awards, professional summary, and projects. \
+Return ALL five sections in a single JSON object.
 
 OUTPUT FORMAT — return ONLY a single valid JSON object, no other text:
 {
-  "date_of_birth": "<YYYY-MM-DD, or null>",
-  "gender": "<Male | Female | Other, or null>",
-  "nationality": "<nationality or null>",
-  "father_name": "<father's full name or null>",
-  "mother_name": "<mother's full name or null>",
-  "aadhar_number": "<12-digit Aadhar number or null>",
-  "pan_number": "<10-char PAN number or null>",
-  "passport_number": "<passport ID or null>",
-  "blood_group": "<e.g. O+, A-, AB+, or null>",
-  "languages_known": "<comma-separated language list or null>",
-  "marital_status": "<Single | Married | Divorced | Widowed or null>"
-}
-
-EXTRACTION RULES:
-- Scan the ENTIRE text — personal details often appear in a "Personal Details", \
-  "Personal Information", "Bio-Data", or "Declaration" section, but may also \
-  appear in a sidebar or footer.
-- date_of_birth: convert any date format to YYYY-MM-DD (e.g. "15 Jan 1990" → "1990-01-15"). \
-  Labels: "DOB", "Date of Birth", "Born on".
-- gender: normalise exactly to "Male", "Female", or "Other".
-- aadhar_number: 12 digits, may be written as "XXXX XXXX XXXX".
-- pan_number: exactly 10 alphanumeric characters (e.g. ABCDE1234F).
-- languages_known: look for labels "Languages Known", "Language Proficiency", \
-  "Languages Spoken", or a "Personal Details" / "Personal Information" section. \
-  Extract ONLY spoken/written human languages (e.g. English, Hindi, Tamil, French). \
-  DO NOT extract programming/scripting languages (Java, Python, SQL, C++, etc.) — \
-  if the only "Languages" entry found is a programming language, return null.
-- marital_status: normalise to one of Single / Married / Divorced / Widowed.
-- DO NOT invent values. If a field is genuinely absent, return null.
-
-Resume text (complete):
-"""
-
-PROMPT_SKILLS = """\
-You are an expert resume parser. Read the complete resume text below and extract \
-ALL skills mentioned anywhere in the document.
-
-OUTPUT FORMAT — return ONLY a single valid JSON object, no other text:
-{
-  "primary_skills": ["<top 5-10 core skills — most prominent in the resume>"],
-  "technical_skills": ["<programming languages, frameworks, databases, tools, platforms, software>"],
-  "general_skills": ["<soft skills, domain knowledge, methodologies, management skills>"],
-  "all_skills": ["<EVERY skill found — union of the above three lists>"]
-}
-
-EXTRACTION RULES:
-- Scan the ENTIRE text — skills appear in sections labelled "Skills", "Technical Skills", \
-  "IT Skills", "Core Competencies", "Areas of Expertise", "Technologies", "Tools", \
-  but ALSO embedded in job descriptions, project descriptions, and summary paragraphs.
-- primary_skills: the candidate's top 5-10 most prominent skills based on: \
-  (a) explicitly listed in a "Key Skills" or "Primary Skills" section, \
-  (b) mentioned most frequently, or (c) highlighted in the summary/objective.
-- technical_skills: include all technologies — languages, frameworks, libraries, \
-  databases, cloud platforms, DevOps tools, IDEs, testing tools, etc.
-- general_skills: include soft skills ("Leadership", "Communication"), methodologies \
-  ("Agile", "Scrum", "Kanban"), and domain expertise ("Project Management", "Financial Analysis").
-- all_skills: deduplicated union of primary + technical + general. DO NOT omit any skill.
-- Copy skill names exactly as written (preserve capitalisation like "JavaScript", "AWS").
-- DO NOT add skills not mentioned in the text.
-- If no skills found, return empty arrays [].
-
-Resume text (complete):
-"""
-
-PROMPT_EXPERIENCE = """\
-You are an expert resume parser. Read the complete resume text below and extract \
-ALL work experience entries and professional metadata.
-
-OUTPUT FORMAT — return ONLY a single valid JSON object, no other text:
-{
-  "experience": [
+  "skills": {
+    "primary_skills": ["<top 5-10 core skills — most prominent in the resume>"],
+    "technical_skills": ["<programming languages, frameworks, databases, tools, platforms, software>"],
+    "general_skills": ["<soft skills, domain knowledge, methodologies, management skills>"],
+    "all_skills": ["<EVERY skill found — union of the above three lists>"]
+  },
+  "certifications": [
     {
-      "company": "<employer/company name exactly as written>",
-      "title": "<job title/designation exactly as written>",
-      "duration": "<start date – end date as written, e.g. Jan 2020 – Present>",
-      "description": "<one concise sentence summarising responsibilities and achievements>",
-      "department": "<department or team name, or null>"
+      "name": "<full certification name exactly as written>",
+      "issuer": "<issuing organisation or null>"
     }
   ],
-  "total_years_of_experience": <numeric decimal e.g. 5.5, or null>,
-  "number_of_companies": <integer count of distinct employers, or null>,
-  "current_company": "<name of the current or most recent employer, or null>",
-  "current_designation": "<current or most recent job title, or null>",
-  "current_ctc": "<current salary/CTC exactly as written e.g. '12 LPA', '₹15,00,000', or null>",
-  "expected_ctc": "<expected salary/CTC exactly as written, or null>",
-  "notice_period": "<notice period exactly as written e.g. '30 days', '2 months', 'Immediate', or null>",
-  "current_employment_status": "<Employed | Unemployed | Freelancer, or null>",
-  "industry": "<primary industry/domain the candidate works in, or null>",
-  "preferred_location": "<preferred work location as written, or null>"
+  "awards": [
+    {
+      "name": "<award or achievement name exactly as written>",
+      "year": "<year as written e.g. 2022, or null>"
+    }
+  ],
+  "summary": "<2-sentence professional summary>",
+  "projects": [
+    {
+      "name": "<full project name exactly as written>",
+      "duration": "<project duration or date range as written, or null>",
+      "description": "<one concise sentence describing the project and technologies used>"
+    }
+  ]
 }
 
-EXTRACTION RULES:
+EXTRACTION RULES — skills:
+- Scan the ENTIRE text — skills appear in "Skills", "Technical Skills", "IT Skills", \
+  "Core Competencies", "Areas of Expertise", "Technologies", "Tools", \
+  but ALSO embedded in job descriptions, project descriptions, and summary paragraphs.
+- primary_skills: top 5-10 most prominent skills based on: \
+  (a) explicitly listed in a "Key Skills" or "Primary Skills" section, \
+  (b) mentioned most frequently, or (c) highlighted in the summary/objective.
+- technical_skills: all technologies — languages, frameworks, libraries, databases, \
+  cloud platforms, DevOps tools, IDEs, testing tools, etc.
+- general_skills: soft skills ("Leadership"), methodologies ("Agile", "Scrum"), \
+  and domain expertise ("Project Management").
+- all_skills: deduplicated union of primary + technical + general.
+- Copy skill names exactly as written (preserve capitalisation like "JavaScript", "AWS").
+- If no skills found, return empty arrays [].
+
+EXTRACTION RULES — certifications:
+- Scan the ENTIRE text — may appear under "Certifications", "Certificates", "Courses", "Training".
+- Include vendor certs (AWS, Azure, GCP, Salesforce, Oracle, Microsoft, Cisco, PMP, etc.) \
+  and named online courses (Coursera, Udemy, edX, NPTEL, etc.).
+- DO NOT include academic degrees (B.Tech, MBA, etc.) — those belong in education.
+- issuer: the organisation that issues the certificate. Use null if not stated.
+- If none found, return [].
+
+EXTRACTION RULES — awards:
+- Scan the ENTIRE text — may appear under "Awards", "Honours", "Recognitions", \
+  "Achievements", "Scholarships", "Accomplishments", or as bullet points in job sections.
+- Include named awards, scholarships, prizes, "Employee of the Month/Year", patents.
+- DO NOT include certifications (e.g. AWS, Salesforce) here.
+- year: 4-digit integer as string. Use null if not stated.
+- If none found, return [].
+
+EXTRACTION RULES — summary:
+- Task 1: If the resume contains an explicit professional summary, objective, or profile \
+  statement, extract it verbatim (or lightly paraphrase to 2 sentences).
+- Task 2: If no explicit summary exists, compose a 2-sentence summary based SOLELY \
+  on the candidate's role, years of experience, and top skills found in the text.
+- Do NOT mention the candidate's name. Write in third-person present tense.
+- The summary must be 25-60 words.
+
+EXTRACTION RULES — projects:
+- Scan the ENTIRE text — may appear under "Projects", "Key Projects", "Personal Projects", \
+  "Academic Projects", "Project Experience", or embedded in job descriptions.
+- Extract EVERY distinct named project.
+- description: one sentence based ONLY on what is written.
+- If no projects found, return [].
+
+GENERAL RULES:
+- DO NOT invent values. If a field is absent, return null or [].
+
+Resume text (complete):
+"""
+
+PROMPT_CHUNK_C = """\
+You are an expert resume parser. Read the complete resume text below and extract \
+ALL work experience entries AND all formal academic qualifications. \
+Return both sections in a single JSON object.
+
+OUTPUT FORMAT — return ONLY a single valid JSON object, no other text:
+{
+  "experience": {
+    "experience": [
+      {
+        "company": "<employer/company name exactly as written>",
+        "title": "<job title/designation exactly as written>",
+        "duration": "<start date – end date as written, e.g. Jan 2020 – Present>",
+        "description": "<one concise sentence summarising responsibilities and achievements>",
+        "department": "<department or team name, or null>"
+      }
+    ],
+    "total_years_of_experience": "<numeric decimal e.g. 5.5, or null>",
+    "number_of_companies": "<integer count of distinct employers, or null>",
+    "current_company": "<name of the current or most recent employer, or null>",
+    "current_designation": "<current or most recent job title, or null>",
+    "current_ctc": "<current salary/CTC exactly as written e.g. '12 LPA', '₹15,00,000', or null>",
+    "expected_ctc": "<expected salary/CTC exactly as written, or null>",
+    "notice_period": "<notice period exactly as written e.g. '30 days', '2 months', 'Immediate', or null>",
+    "current_employment_status": "<Employed | Unemployed | Freelancer, or null>",
+    "industry": "<primary industry/domain the candidate works in, or null>",
+    "preferred_location": "<preferred work location as written, or null>"
+  },
+  "education": {
+    "education": [
+      {
+        "institution": "<college, university, or school name exactly as written>",
+        "degree": "<degree title e.g. B.Tech, M.Sc, MBA, Ph.D, 12th, 10th>",
+        "field_of_study": "<subject/discipline/branch e.g. Computer Science, Finance>",
+        "start_year": "<4-digit integer or null>",
+        "end_year": "<4-digit integer or null>",
+        "grade": "<CGPA, GPA, percentage, or division as written, or null>"
+      }
+    ],
+    "highest_degree": "<highest academic qualification e.g. Ph.D | M.Tech | MBA | B.Tech | Diploma | 12th | 10th, or null>",
+    "qualification_1": "<most recent/highest degree short form e.g. MBA, M.Tech>",
+    "qualification_1_type": "<Post Graduation | Graduation | Diploma | 12th | 10th>",
+    "institute_1": "<institution for qualification_1>",
+    "qualification_2": "<second qualification short form e.g. B.Tech, B.Sc>",
+    "qualification_2_type": "<Post Graduation | Graduation | Diploma | 12th | 10th>",
+    "institute_2": "<institution for qualification_2>",
+    "education_detail": "<one-line summary e.g. 'MBA from IIM Ahmedabad (2020), B.Tech from IIT Delhi (2018)'>"
+  }
+}
+
+EXTRACTION RULES — experience:
 - Scan the ENTIRE text — experience entries may appear under "Work Experience", \
   "Professional Experience", "Employment History", "Career History", "Work History", \
   or sometimes under "Projects" when the resume is project-based.
@@ -311,217 +401,41 @@ EXTRACTION RULES:
   start date to the latest end date (treat "till date"/"present"/"current" as 2024); \
   round to 1 decimal place. \
   DO NOT add up project durations or client engagement periods — use employer tenures only.
-- number_of_companies: count ONLY the companies listed under "Work Experience", \
-  "Employment History", or "Organization" fields where the candidate held a direct \
-  employment role (with a Designation/Title). Do NOT count "Client" fields, \
-  end-clients, or project clients — those are NOT employers. \
-  Example: if the resume lists Organization=Infosys and Client=Citibank under a project, \
-  count only Infosys.
+- number_of_companies: count ONLY companies where the candidate held a direct employment role \
+  (with a Designation/Title). Do NOT count "Client" fields or project clients. \
+  Example: Organization=Infosys, Client=Citibank → count only Infosys.
 - current_employment_status: infer "Employed" if the latest role says "Present" or "Current"; \
   "Unemployed" if all roles have end dates in the past; "Freelancer" if stated.
-- current_ctc / expected_ctc: look for labels "CTC", "Current CTC", "Salary", \
-  "Current Salary", "Expected CTC", "Expected Salary", "Package".
+- current_ctc / expected_ctc: look for "CTC", "Current CTC", "Salary", "Expected CTC", "Package".
 - notice_period: look for "Notice Period", "Joining Time", "Available from".
 - preferred_location: look for "Preferred Location", "Location Preference", "Open to".
 - current_designation: use the title from the most recent experience entry. \
-  If experience entries exist but none have an explicit title, OR if there are NO experience entries, \
-  look at the FIRST LINE of the resume text — if it is 1–6 words in all-caps or title-case and \
-  is NOT a section header word (not "Summary", "Skills", "Experience", "Education", "Profile", \
-  "Objective", "Resume", "Curriculum", "Vitae", "CV"), treat it as the job title and use it. \
-  This handles resumes where the designation appears only as the document headline.
-- DO NOT invent companies, titles, dates, salaries, or descriptions. \
-  If no experience found, return {"experience": []}.
+  If no experience entries have an explicit title, look at the FIRST LINE of the resume — \
+  if it is 1–6 words in all-caps or title-case and is NOT a section header word \
+  (not "Summary", "Skills", "Experience", "Education", "Profile", "Objective", \
+  "Resume", "Curriculum", "Vitae", "CV"), treat it as the job title.
+- If no experience found, return "experience": [].
 
-Resume text (complete):
-"""
-
-PROMPT_EDUCATION = """\
-You are an expert resume parser. Read the complete resume text below and extract \
-ALL formal academic qualifications.
-
-OUTPUT FORMAT — return ONLY a single valid JSON object, no other text:
-{
-  "education": [
-    {
-      "institution": "<college, university, or school name exactly as written>",
-      "degree": "<degree title e.g. B.Tech, M.Sc, MBA, Ph.D, 12th, 10th>",
-      "field_of_study": "<subject/discipline/branch e.g. Computer Science, Finance>",
-      "start_year": <4-digit integer or null>,
-      "end_year": <4-digit integer or null>,
-      "grade": "<CGPA, GPA, percentage, or division as written, or null>"
-    }
-  ],
-  "highest_degree": "<highest academic qualification e.g. Ph.D | M.Tech | MBA | B.Tech | Diploma | 12th | 10th, or null>",
-  "qualification_1": "<most recent/highest degree short form e.g. MBA, M.Tech>",
-  "qualification_1_type": "<Post Graduation | Graduation | Diploma | 12th | 10th>",
-  "institute_1": "<institution for qualification_1>",
-  "qualification_2": "<second qualification short form e.g. B.Tech, B.Sc>",
-  "qualification_2_type": "<Post Graduation | Graduation | Diploma | 12th | 10th>",
-  "institute_2": "<institution for qualification_2>",
-  "education_detail": "<one-line summary e.g. 'MBA from IIM Ahmedabad (2020), B.Tech from IIT Delhi (2018)'>"
-}
-
-EXTRACTION RULES:
-- Scan the ENTIRE text — education may appear under "Education", "Academic Background", \
-  "Qualifications", "Academic Details", but degree info can also appear in a summary/objective.
+EXTRACTION RULES — education:
+- Scan the ENTIRE text — may appear under "Education", "Academic Background", \
+  "Qualifications", "Academic Details", or degree info in a summary/objective.
 - Include ALL formal academic degrees: B.E., B.Tech, B.Sc, B.Com, B.A., BCA, MCA, \
   M.Tech, M.Sc, M.Com, MBA, PGDM, Post Graduate Diploma, Ph.D, Diploma, 12th/HSC, 10th/SSC.
-- DO NOT include professional certifications (AWS, Salesforce, Microsoft, Oracle, etc.) here — \
-  those belong in the certifications section.
-- start_year / end_year: extract as 4-digit integers. If only one year shown (graduation year), \
-  put it in end_year and leave start_year null.
-- grade: accept CGPA (e.g. 8.5/10), GPA (e.g. 3.8/4.0), percentage (e.g. 78%), \
-  or division (e.g. First Class, Distinction).
+- DO NOT include professional certifications — those belong in certifications.
+- start_year / end_year: 4-digit integers. If only one year shown, put it in end_year.
+- grade: accept CGPA, GPA, percentage, or division (e.g. First Class, Distinction).
 - highest_degree: the most advanced degree found — use the standard short form.
-- qualification_1_type / qualification_2_type: classify strictly as one of: \
-  "Post Graduation", "Graduation", "Diploma", "12th", "10th".
+- qualification_1_type / qualification_2_type: one of \
+  "Post Graduation", "Graduation", "Diploma", "12th", "10th". \
   (Ph.D, M.Tech, MBA, MCA → "Post Graduation"; B.Tech, B.Sc, BCA, B.Com → "Graduation"; \
    Diploma → "Diploma"; 12th/HSC → "12th"; 10th/SSC → "10th")
-- education_detail: concise one-line string combining degree + institution (+ year if available) \
+- education_detail: concise one-line string combining degree + institution (+ year) \
   for the top 2-3 qualifications.
 - Order education entries from MOST RECENT to OLDEST.
-- If no formal education found, return {"education": []}.
+- If no formal education found, return "education": [].
 
-Resume text (complete):
-"""
-
-PROMPT_CERTIFICATIONS = """\
-You are an expert resume parser. Read the complete resume text below and extract \
-ALL professional certifications, courses, and licenses.
-
-OUTPUT FORMAT — return ONLY a single valid JSON object, no other text:
-{
-  "certifications": [
-    {
-      "name": "<full certification name exactly as written>",
-      "issuer": "<issuing organisation or null>"
-    }
-  ]
-}
-
-EXTRACTION RULES:
-- Scan the ENTIRE text — certifications may appear under "Certifications", "Certificates", \
-  "Professional Certifications", "Licenses & Certifications", "Courses", "Training", \
-  or even in a "Skills" section.
-- Include ALL named certifications: vendor certs (AWS, Azure, GCP, Salesforce, Oracle, \
-  Microsoft, Cisco, PMP, PRINCE2, Six Sigma, CFA, CPA, etc.) and named online courses \
-  (Coursera, Udemy, edX, NPTEL, etc.).
-- DO NOT include academic degrees (B.Tech, MBA, etc.) — those belong in education.
-- name: copy the certification name exactly as written.
-- issuer: the organisation that issues the certificate (e.g. "Amazon Web Services", \
-  "Salesforce", "PMI", "Microsoft"). Use null if not stated.
-- If none found, return {"certifications": []}.
-
-Resume text (complete):
-"""
-
-PROMPT_PROJECTS = """\
-You are an expert resume parser. Read the complete resume text below and extract \
-ALL projects mentioned.
-
-OUTPUT FORMAT — return ONLY a single valid JSON object, no other text:
-{
-  "projects": [
-    {
-      "name": "<full project name exactly as written>",
-      "duration": "<project duration or date range as written, or null>",
-      "description": "<one concise sentence describing the project and technologies used>"
-    }
-  ]
-}
-
-EXTRACTION RULES:
-- Scan the ENTIRE text — projects may appear under "Projects", "Key Projects", \
-  "Personal Projects", "Academic Projects", "Project Experience", or embedded in \
-  job descriptions as sub-bullets.
-- Extract EVERY distinct project named (not generic job responsibility bullets).
-- name: the full project title — do not truncate.
-- duration: dates as written (e.g. "Jan 2022 – Mar 2022", "3 months"). Use null if absent.
-- description: one sentence based ONLY on what is written — include what the project does \
-  and any notable technologies.
-- DO NOT invent project names, technologies, or outcomes.
-- If no projects found, return {"projects": []}.
-
-Resume text (complete):
-"""
-
-PROMPT_AWARDS = """\
-You are an expert resume parser. Read the complete resume text below and extract \
-ALL awards, honours, achievements, recognitions, and scholarships.
-
-OUTPUT FORMAT — return ONLY a single valid JSON object, no other text:
-{
-  "awards": [
-    {
-      "name": "<award or achievement name exactly as written>",
-      "year": "<year as written e.g. 2022, or null>"
-    }
-  ]
-}
-
-EXTRACTION RULES:
-- Scan the ENTIRE text — awards may appear under "Awards", "Honours", "Recognitions", \
-  "Achievements", "Scholarships", "Accomplishments", or as bullet points in job sections.
-- Include: named awards, certificates of recognition, scholarships, prizes, \
-  "Employee of the Month/Year", ranked positions (e.g. "Ranked 1st in…"), patents.
-- DO NOT include certifications (e.g. AWS, Salesforce) here — those belong in certifications.
-- name: exact text as written.
-- year: the year of the award (4-digit integer as string). Use null if not stated.
-- If none found, return {"awards": []}.
-
-Resume text (complete):
-"""
-
-PROMPT_SUMMARY = """\
-You are an expert resume writer and parser. Read the complete resume text below.
-
-Task 1: If the resume contains an explicit professional summary, objective, or profile \
-statement, extract it verbatim (or lightly paraphrase to 2 sentences).
-Task 2: If no explicit summary exists, compose a 2-sentence professional summary \
-based SOLELY on the candidate's role, years of experience, and top skills found in the text.
-
-OUTPUT FORMAT — return ONLY a single valid JSON object, no other text:
-{
-  "summary": "<2-sentence professional summary>"
-}
-
-RULES:
-- Base the summary ENTIRELY on facts stated in the text — do not add anything not mentioned.
-- Do NOT mention the candidate's name.
-- Write in third-person present tense (e.g. "Results-driven engineer with 8 years…").
-- The summary must be 25-60 words.
-- DO NOT copy verbatim long paragraphs from the resume — synthesise into 2 sentences.
-
-Resume text (complete):
-"""
-
-PROMPT_PROFESSIONAL_META = """\
-You are an expert resume parser. Read the complete resume text below and extract \
-professional metadata that may appear ANYWHERE in the document.
-
-OUTPUT FORMAT — return ONLY a single valid JSON object, no other text:
-{
-  "current_ctc": "<current salary/CTC exactly as written e.g. '12 LPA', '₹15,00,000 p.a.', or null>",
-  "expected_ctc": "<expected salary/CTC exactly as written, or null>",
-  "notice_period": "<notice period exactly as written e.g. '30 days', '2 months', 'Immediate', or null>",
-  "industry": "<primary industry or domain e.g. 'Information Technology', 'Finance', 'Healthcare', or null>",
-  "preferred_location": "<preferred work location as written, or null>",
-  "marital_status": "<Single | Married | Divorced | Widowed, or null>",
-  "languages_known": "<comma-separated language list, or null>",
-  "nationality": "<nationality, or null>",
-  "blood_group": "<e.g. O+, A-, AB+, or null>",
-  "gender": "<Male | Female | Other, or null>",
-  "date_of_birth": "<YYYY-MM-DD, or null>"
-}
-
-EXTRACTION RULES:
-- Scan the ENTIRE text including headers, footers, sidebars, and personal detail sections.
-- current_ctc: look for "Current CTC", "CTC", "Current Salary", "Present Salary", "Package".
-- expected_ctc: look for "Expected CTC", "Expected Salary", "Desired CTC", "Salary Expectation".
-- notice_period: look for "Notice Period", "Availability", "Joining Time", "Can join in".
-- industry: infer from job titles and companies if not explicitly stated.
-- preferred_location: look for "Preferred Location", "Location Preference", "Open to relocation".
-- DO NOT invent any value. Return null for anything not found in the text.
+GENERAL RULES:
+- DO NOT invent companies, titles, dates, salaries, degrees, or descriptions.
 
 Resume text (complete):
 """
@@ -536,141 +450,14 @@ Resume text (complete):
 # (chunk_name, prompt_template, max_tokens)
 # ---------------------------------------------------------------------------
 CHUNKS = [
-    ("contact",           PROMPT_CONTACT,           350),
-    ("personal",          PROMPT_PERSONAL,           300),
-    ("skills",            PROMPT_SKILLS,             800),
-    ("experience",        PROMPT_EXPERIENCE,        2000),
-    ("education",         PROMPT_EDUCATION,          600),
-    ("certifications",    PROMPT_CERTIFICATIONS,     400),
-    ("projects",          PROMPT_PROJECTS,           800),
-    ("awards",            PROMPT_AWARDS,             300),
-    ("summary",           PROMPT_SUMMARY,            200),
-    ("professional_meta", PROMPT_PROFESSIONAL_META,  300),
+    ("chunk_a", PROMPT_CHUNK_A, 950),
+    ("chunk_b", PROMPT_CHUNK_B, 2100),
+    ("chunk_c", PROMPT_CHUNK_C, 2600),
 ]
 
 
-# ---------------------------------------------------------------------------
-# Section splitter — used ONLY for experience/skills/education context hints
-# when the full resume is very long (>8000 chars). For short resumes the full
-# text is already sent to every chunk so this is not needed.
-# ---------------------------------------------------------------------------
-
-_HEADER_PATTERNS = {
-    "skills":         r'(?:^|\n)[^\n]{0,10}(?:TECHNICAL\s+SKILLS?|IT\s+SKILLS?|AREAS?\s+OF\s+EXPERTISE|TECHNOLOGIES|TOOLS\s*&?\s*TECH(?:NOLOGIES)?|CORE\s+COMPETENCIES|(?<!SOFT\s)SKILLS?)[^\n]{0,20}(?:\n|$)',
-    "experience":     r'(?:^|\n)[^\n]{0,10}(?:WORK\s+EXPERIENCE|PROFESSIONAL\s+EXPERIENCE|EXPERIENCE|EMPLOYMENT\s+HISTORY|CAREER\s+HISTORY|WORK\s+HISTORY)[^\n]{0,20}(?:\n|$)',
-    "education":      r'(?:^|\n)[^\n]{0,10}(?:EDUCATION(?:AL)?\s*(?:BACKGROUND|QUALIFICATION)?|ACADEMIC\s+(?:BACKGROUND|QUALIFICATION|DETAILS)?|QUALIFICATION)[^\n]{0,20}(?:\n|$)',
-    "projects":       r'(?:^|\n)[^\n]{0,10}(?:KEY\s+PROJECTS?|PERSONAL\s+PROJECTS?|PROJECTS?\s*(?:EXPERIENCE|UNDERTAKEN|HANDLED|DETAILS)?)\s*\n',
-    "certifications": r'(?:^|\n)[^\n]{0,10}(?:CERTIFICATIONS?|CERTIFICATES?|PROFESSIONAL\s+CERTIFICATIONS?|LICENSES?\s*&?\s*CERTIFICATIONS?)[^\n]{0,20}(?:\n|$)',
-    "awards":         r'(?:^|\n)[^\n]{0,10}(?:AWARDS?\s*(?:&\s*(?:HONOURS?|HONORS?|SCHOLARSHIPS?|RECOGNITION))?|HONOURS?|HONORS?|SCHOLARSHIPS?|RECOGNITION)\s*\n',
-    "personal":       r'(?:^|\n)[^\n]{0,10}(?:PERSONAL\s+(?:DETAILS?|INFO(?:RMATION)?|PROFILE)|DECLARATION|BIO[\s\-]?DATA)[^\n]{0,20}(?:\n|$)',
-}
-
-_SECTION_CHAR_LIMIT = {
-    "skills":         3000,
-    "experience":     7000,
-    "education":      2500,
-    "projects":       3500,
-    "certifications": 2500,
-    "awards":         2000,
-    "contact":        1500,
-    "personal":       2500,
-    "summary":        3000,
-}
-
-# Maximum resume length to send to EVERY chunk prompt without truncation.
-# Resumes above this threshold get section-targeted text for the heavy chunks
-# (experience, education, skills) to avoid exceeding token limits, while
-# contact/personal/meta always receive the full text.
+# Maximum resume length to send to each chunk without truncation.
 _FULL_TEXT_THRESHOLD = 8000
-
-
-def _build_section_texts(text: str) -> dict[str, str]:
-    """
-    Build per-section text slices for resumes that exceed _FULL_TEXT_THRESHOLD.
-
-    For short resumes every chunk already receives the full text.
-    For long resumes we detect section boundaries and route each chunk to its
-    relevant portion. Fallbacks ensure every chunk gets *something* to work with.
-    """
-    positions: dict[str, int] = {}
-    for section, pattern in _HEADER_PATTERNS.items():
-        match = re.search(pattern, text, re.IGNORECASE)
-        if match:
-            positions[section] = match.start()
-
-    sorted_pos = sorted(positions.items(), key=lambda x: x[1])
-    result: dict[str, str] = {}
-
-    for i, (name, pos) in enumerate(sorted_pos):
-        end = sorted_pos[i + 1][1] if i + 1 < len(sorted_pos) else len(text)
-        limit = _SECTION_CHAR_LIMIT.get(name, 2000)
-        result[name] = text[pos:end].strip()[:limit]
-
-    # ── Fallback: no headers detected (plain-text resume) ────────────────────
-    if not result:
-        full = text
-        result = {
-            "skills":         full[:3000],
-            "experience":     full[:7000],
-            "education":      full[:2500],
-            "certifications": full[:2500],
-            "projects":       full[:3500],
-            "awards":         full[:2000],
-            "personal":       full[:2500],
-        }
-
-    # ── Augment skills: merge IT Skills block if at a different position ─────
-    it_match = re.search(r'(?:^|\n)[^\n]{0,10}IT\s+SKILLS?[^\n]{0,20}(?:\n|$)', text, re.IGNORECASE)
-    if it_match and it_match.start() != positions.get("skills", -1):
-        it_text = text[it_match.start():it_match.start() + 600].strip()
-        existing = result.get("skills", "")
-        if it_text and it_text not in existing:
-            result["skills"] = (existing + "\n\n" + it_text)[:3000]
-
-    # ── Awards may contain projects if AWARDS header comes before PROJECTS ───
-    awards_text = result.get("awards", "")
-    proj_in_awards = re.search(
-        r'(?:^|\n)[^\n]{0,10}(?:KEY\s+PROJECTS?|PERSONAL\s+PROJECTS?|PROJECTS?\s*(?:EXPERIENCE|UNDERTAKEN|HANDLED|DETAILS)?)\s*\n',
-        awards_text, re.IGNORECASE
-    )
-    if proj_in_awards and "projects" not in result:
-        proj_start = proj_in_awards.start()
-        result["projects"] = awards_text[proj_start:proj_start + 3500].strip()
-        result["awards"]   = awards_text[:proj_start].strip()
-
-    # ── Experience too short → merge in projects (project-based resumes) ─────
-    if result.get("experience") and len(result["experience"]) < 500:
-        if result.get("projects"):
-            combined = result["experience"] + "\n\n" + result["projects"]
-            result["experience"] = combined[:7000]
-
-    # ── Education sparse (multi-column layout) → extend to end of document ───
-    edu_text = result.get("education", "")
-    if edu_text:
-        edu_nonws = len(re.sub(r'\s', '', edu_text))
-        if len(edu_text) > 0 and edu_nonws / len(edu_text) < 0.20 and "education" in positions:
-            result["education"] = text[positions["education"]:].strip()[:3000]
-
-    # ── Education too short → append certifications section ──────────────────
-    if result.get("education") and len(result["education"]) < 150:
-        if result.get("certifications"):
-            result["education"] = (result["education"] + "\n\n" + result["certifications"])[:3000]
-
-    # ── Education missing → full text (degrees can be anywhere) ─────────────
-    if "education" not in result:
-        result["education"] = text[:3000]
-
-    # ── Certifications missing → tail of document (often at the end) ─────────
-    if "certifications" not in result:
-        result["certifications"] = result.get("education", text[-2500:])
-
-    # Contact and personal always use full text (they're small sections)
-    result["contact"] = text[:_FULL_TEXT_THRESHOLD]
-    result["personal"] = text[:_FULL_TEXT_THRESHOLD]
-    result["summary"]  = text[:3000]
-    result["professional_meta"] = text[:_FULL_TEXT_THRESHOLD]
-
-    return result
 
 
 # ---------------------------------------------------------------------------
@@ -990,30 +777,22 @@ async def _call_chunk(chunk_name: str, prompt: str, max_tok: int, chunk_text: st
 
 async def parse_resume(text: str) -> dict:
     """
-    Parse resume using parallel LLM calls via OpenRouter.
+    Parse resume using 3 parallel LLM calls via OpenRouter.
 
     Architecture:
     1. Normalise raw text (remove encoding artefacts, collapse whitespace).
-    2. If text is short (<= _FULL_TEXT_THRESHOLD chars), send full text to EVERY prompt.
-       If text is long, build section-targeted slices for the heavy chunks while
-       contact/personal/meta always receive the full text (up to _FULL_TEXT_THRESHOLD).
-    3. Fire all chunk requests concurrently via asyncio.gather.
-    4. Merge professional_meta into experience/personal to fill any gaps.
-    5. Compute the 7-category score matrix.
+    2. Send full text (up to _FULL_TEXT_THRESHOLD) to all 3 chunks in parallel.
+       - Chunk A: contact + personal + professional_meta (950 tokens)
+       - Chunk B: skills + certifications + awards + summary + projects (2100 tokens)
+       - Chunk C: experience + education (2600 tokens)
+    3. Merge professional_meta into experience/personal to fill any gaps.
+    4. Compute the 7-category score matrix.
     """
     text = _normalise_text(text)
-
-    if len(text) <= _FULL_TEXT_THRESHOLD:
-        # Short resume: every chunk gets the full text — most accurate path.
-        section_texts: dict[str, str] = {name: text for name, _, _ in CHUNKS}
-    else:
-        section_texts = _build_section_texts(text)
-        # Always send full text to lightweight/global-scan chunks
-        for name in ("contact", "personal", "summary", "professional_meta", "skills", "certifications", "awards"):
-            section_texts[name] = text[:_FULL_TEXT_THRESHOLD]
+    chunk_text = text[:_FULL_TEXT_THRESHOLD]
 
     coroutines = [
-        _call_chunk(name, prompt, max_tok, section_texts.get(name, text[:_FULL_TEXT_THRESHOLD]))
+        _call_chunk(name, prompt, max_tok, chunk_text)
         for name, prompt, max_tok in CHUNKS
     ]
 
@@ -1026,7 +805,23 @@ async def parse_resume(text: str) -> dict:
         logger.error("parse_resume: overall 120-second timeout exceeded")
         raise HTTPException(status_code=504, detail="Resume parsing timed out. Try a smaller file.")
 
-    parsed = {name: data for name, data in results}
+    # Unpack 3-chunk results into per-section dicts
+    parsed: dict = {}
+    for chunk_name, data in results:
+        if chunk_name == "chunk_a":
+            parsed["contact"]           = data.get("contact", {})
+            parsed["personal"]          = data.get("personal", {})
+            parsed["professional_meta"] = data.get("professional_meta", {})
+        elif chunk_name == "chunk_b":
+            parsed["skills"]        = data.get("skills", {})
+            parsed["certifications"] = {"certifications": data.get("certifications", [])}
+            parsed["awards"]        = {"awards": data.get("awards", [])}
+            parsed["summary"]       = {"summary": data.get("summary")}
+            parsed["projects"]      = {"projects": data.get("projects", [])}
+        elif chunk_name == "chunk_c":
+            parsed["experience"] = data.get("experience", {})
+            parsed["education"]  = data.get("education", {})
+
     parsed = _merge_professional_meta(parsed)
 
     score = _compute_score(parsed)

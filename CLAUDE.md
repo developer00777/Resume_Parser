@@ -12,8 +12,8 @@ Both modes are available simultaneously on the same running server.
 
 - **Framework:** FastAPI 0.115.0 + Uvicorn 0.32.0
 - **Language:** Python 3.11
-- **LLM:** Ollama (local) — model `llama3.2:3b`
-- **PDF Parsing:** PyPDF 5.1.0
+- **LLM:** OpenRouter — model `openai/gpt-4o-mini` (extraction + OCR)
+- **PDF Parsing:** PyPDF 5.1.0 (text-based); OCR fallback via gpt-4o-mini vision (image-based)
 - **DOCX Parsing:** python-docx 1.1.2
 - **HTTP Client:** httpx 0.27.2 (async)
 - **Config:** Pydantic Settings + python-dotenv
@@ -31,8 +31,8 @@ app/
 │   ├── parser.py            # /api/v1/parse, /api/v1/models  (web-app endpoints)
 │   └── salesforce.py        # /api/v1/salesforce/*           (Salesforce endpoints)
 ├── services/
-│   ├── document.py          # PDF/DOCX text extraction & file validation
-│   ├── llm.py               # Ollama integration, 8 prompts, score computation
+│   ├── document.py          # PDF/DOCX extraction; OCR fallback for image-based PDFs
+│   ├── llm.py               # OpenRouter integration, 3 consolidated prompts, score computation
 │   └── salesforce.py        # OAuth2 token flow + resume file fetch from SF
 ├── schemas/response.py      # Pydantic models: ResumeData, SalesforceResumeData,
 │                            #   map_to_salesforce(), ParseResponse, etc.
@@ -100,8 +100,10 @@ All env vars — see `.env.example` for full list.
 
 | Variable | Default | Description |
 |---|---|---|
-| `OLLAMA_MODEL` | `llama3.2:3b` | LLM model |
-| `OLLAMA_HOST` | `http://ollama:11434` | Ollama endpoint |
+| `OPENROUTER_API_KEY` | `""` | OpenRouter API key |
+| `OPENROUTER_MODEL` | `openai/gpt-4o-mini` | LLM extraction model |
+| `OPENROUTER_OCR_MODEL` | `openai/gpt-4o-mini` | Vision model for image-based PDF OCR |
+| `OPENROUTER_BASE_URL` | `https://openrouter.ai/api/v1` | OpenRouter base URL |
 | `API_KEY` | `changeme` | X-API-Key value |
 | `MAX_FILE_SIZE` | `10485760` | Upload limit (bytes) |
 | `LOG_LEVEL` | `INFO` | Logging level |
@@ -143,7 +145,8 @@ Pipeline: `lint → test → docker-build`
 - **Async throughout:** httpx async client reused across Ollama calls
 - **Graceful degradation:** Empty fields returned on LLM extraction failure (no crash)
 - **Auth middleware:** `X-API-Key` on all `/api/v1/*`; public: `/health`, `/docs`, `/redoc`
-- **LLM:** temperature=0.1, 8 specialized prompts, regex section-splitting before LLM
-- **Score matrix:** 7-category weighted system (contact 5%, summary 15%, experience 25%, skills 20%, education+certs 10%, achievements 15%, format 10%) — each raw 0–10, overall 0–100 with grade band (Excellent/Good/Averag  e/Poor)
+- **LLM:** temperature=0.0, 3 consolidated prompts fired in parallel (Chunk A: contact+personal+meta 950tok, Chunk B: skills+certs+awards+summary+projects 2100tok, Chunk C: experience+education 2600tok)
+- **OCR fallback:** PyPDF first; if <100 chars extracted, sends raw PDF as base64 data URL to gpt-4o-mini vision via OpenRouter
+- **Score matrix:** 7-category weighted system (contact 5%, summary 15%, experience 25%, skills 20%, education+certs 10%, achievements 15%, format 10%) — each raw 0–10, overall 0–100 with grade band (Excellent/Good/Average/Poor)
  
  

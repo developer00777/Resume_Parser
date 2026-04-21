@@ -680,7 +680,7 @@ class TestSpotCheck:
         if not path.exists():
             pytest.skip("AbhishekSumanCV.pdf not found")
 
-        text = _extract_pdf(path.read_bytes())
+        text = await _extract_pdf(path.read_bytes())
         text = _normalise_text(text)
         parsed = await parse_resume(text)
 
@@ -723,7 +723,7 @@ class TestSpotCheck:
         if not path.exists():
             pytest.skip("Tharun resume not found")
 
-        text = _extract_pdf(path.read_bytes())
+        text = await _extract_pdf(path.read_bytes())
         text = _normalise_text(text)
         parsed = await parse_resume(text)
 
