@@ -162,280 +162,280 @@ def _normalise_text(raw: str) -> str:
 # ---------------------------------------------------------------------------
 
 PROMPT_CHUNK_A = """\
-You are an expert resume parser. Read the complete resume text below and extract \
-contact information, personal/biographical details, and professional metadata. \
-Return ALL three sections in a single JSON object.
+You are a precise resume data extraction engine. Your ONLY job is to read the resume \
+text below and output a single valid JSON object — no prose, no markdown, no explanation.
 
-OUTPUT FORMAT — return ONLY a single valid JSON object, no other text:
+OUTPUT FORMAT — return ONLY this JSON structure, nothing else:
 {
   "contact": {
-    "first_name": "<given/first name only, or null>",
-    "last_name": "<family/surname only, or null>",
-    "full_name": "<complete name as written, or null>",
-    "email": "<primary email — must contain @, or null>",
-    "alternate_email": "<second email if present, else null>",
-    "phone": "<primary phone number with country code if shown, or null>",
-    "alternate_phone": "<second/alternate phone number, or null>",
-    "current_location": "<city and state/country as written, or null>",
-    "linkedin_url": "<full LinkedIn profile URL — must contain 'linkedin.com', or null>",
-    "web_address": "<personal website, portfolio, or GitHub URL — NOT LinkedIn, or null>"
+    "first_name": "<GIVEN name only — e.g. 'Nitesh', 'Abhishek'. For 3-word names like \
+'Nitesh Kumar Singh', first_name='Nitesh', last_name='Kumar Singh'. Never split the \
+surname component. Null if not found.>",
+    "last_name": "<FAMILY/SURNAME — everything after the first given name. For 'Nitesh Kumar Singh' \
+→ 'Kumar Singh'. For 'Abhishek Suman' → 'Suman'. Null if not found.>",
+    "full_name": "<candidate's COMPLETE name exactly as written on the resume, e.g. \
+'Nitesh Kumar Singh', 'ABHISHEK SUMAN'. This is the official name — NOT a company or employer name.>",
+    "email": "<primary email address — must contain @ and a dot. Take the FIRST one found. \
+Null if absent. NEVER return a salary number or date as email.>",
+    "alternate_email": "<second email address if a different one appears, else null>",
+    "phone": "<PRIMARY mobile/phone number. Include country code if shown (+91, +1, etc.). \
+Accept formats: +91-9876543210, 9876543210, (800) 555-1234. \
+CRITICAL — REJECT: salary figures like 12,00,000 or 15,00,000; years like 2019, 2022; \
+employee IDs; Aadhar numbers (12 digits). If unsure, return null.>",
+    "alternate_phone": "<second phone/mobile number only if a DIFFERENT number appears. \
+Apply the same rejection rules as 'phone'. Null if only one number found.>",
+    "current_location": "<city and state/country exactly as written, e.g. 'Mumbai, Maharashtra', \
+'Muzaffarpur, Bihar'. Labels to scan: Location, Address, City, Based in, Residing at, Place, \
+Permanent Address. If value is 'Open to relocate', 'Anywhere', or 'PAN India', return null.>",
+    "linkedin_url": "<full LinkedIn URL — must start with 'http' or 'linkedin.com/in/'. \
+Null if not present.>",
+    "web_address": "<personal website, portfolio, or GitHub URL. Must NOT be a LinkedIn URL. \
+Null if not present.>"
   },
   "personal": {
-    "date_of_birth": "<YYYY-MM-DD, or null>",
-    "gender": "<Male | Female | Other, or null>",
-    "nationality": "<nationality or null>",
-    "father_name": "<father's full name or null>",
-    "mother_name": "<mother's full name or null>",
-    "aadhar_number": "<12-digit Aadhar number or null>",
-    "pan_number": "<10-char PAN number or null>",
-    "passport_number": "<passport ID or null>",
-    "blood_group": "<e.g. O+, A-, AB+, or null>",
-    "languages_known": "<comma-separated human language list or null>",
-    "marital_status": "<Single | Married | Divorced | Widowed or null>"
+    "date_of_birth": "<Convert ANY date format to YYYY-MM-DD. Labels: DOB, Date of Birth, \
+Born on, D.O.B. Example: '25th Aug 1986' → '1986-08-25', '15/05/1991' → '1991-05-15'. \
+Null if not found.>",
+    "gender": "<Normalise EXACTLY to one of: Male | Female | Other. Labels: Sex, Gender. \
+'M' → 'Male', 'F' → 'Female'. Null if not found.>",
+    "nationality": "<as written, e.g. 'Indian', 'British', 'Malaysian'. Null if not found.>",
+    "father_name": "<father's full name. Labels: Father's Name, Father Name, F/O, S/O (son of). \
+Null if not found.>",
+    "mother_name": "<mother's full name. Labels: Mother's Name, Mother Name, M/O. \
+Null if not found.>",
+    "aadhar_number": "<exactly 12 digits, may appear as 'XXXX XXXX XXXX'. Null if not found.>",
+    "pan_number": "<exactly 10 alphanumeric chars, format like ABCDE1234F. Null if not found.>",
+    "passport_number": "<passport document number. Null if not found.>",
+    "blood_group": "<e.g. O+, A-, AB+, B+. Null if not found.>",
+    "languages_known": "<comma-separated list of HUMAN SPOKEN/WRITTEN languages ONLY — \
+e.g. 'English, Hindi, Tamil, French'. \
+STRICTLY EXCLUDE programming/scripting languages: Java, Python, C++, SQL, JavaScript, \
+R, Go, Swift, Kotlin, etc. These are technical skills, NOT spoken languages. \
+Null if no human languages found.>",
+    "marital_status": "<Normalise to EXACTLY one of: Single | Married | Divorced | Widowed. \
+Null if not found.>"
   },
   "professional_meta": {
-    "current_ctc": "<current salary/CTC exactly as written e.g. '12 LPA', '₹15,00,000 p.a.', or null>",
-    "expected_ctc": "<expected salary/CTC exactly as written, or null>",
-    "notice_period": "<notice period exactly as written e.g. '30 days', '2 months', 'Immediate', or null>",
-    "industry": "<primary industry or domain e.g. 'Information Technology', 'Finance', 'Healthcare', or null>",
-    "preferred_location": "<preferred work location as written, or null>",
-    "marital_status": "<Single | Married | Divorced | Widowed, or null>",
-    "languages_known": "<comma-separated language list, or null>",
-    "nationality": "<nationality, or null>",
-    "blood_group": "<e.g. O+, A-, AB+, or null>",
-    "gender": "<Male | Female | Other, or null>",
-    "date_of_birth": "<YYYY-MM-DD, or null>"
+    "current_ctc": "<Current salary/CTC EXACTLY as written — do not convert or normalise. \
+Examples: '12 LPA', '₹15,00,000 p.a.', '12,00,000-15,00,000 (Negotiable) PER ANNUM'. \
+Labels: Current CTC, CTC, Current Salary, Present Salary, Salary, Package, Expected Salary. \
+CRITICAL — salary figures look like 12,00,000 or 15,00,000; do NOT confuse with phone numbers. \
+Null if not found.>",
+    "expected_ctc": "<Expected salary EXACTLY as written. Labels: Expected CTC, Expected Salary, \
+Desired CTC, Salary Expectation. Null if not found.>",
+    "notice_period": "<exactly as written — e.g. '30 days', '2 months', 'Immediate', \
+'1 month'. Labels: Notice Period, Availability, Joining Time, Can join in. Null if not found.>",
+    "industry": "<primary industry/sector the candidate works in. Infer from job titles and \
+company names if not explicitly stated. E.g. 'Oil & Gas', 'Information Technology', \
+'Construction', 'Banking & Finance', 'Healthcare'. Null if genuinely unclear.>",
+    "preferred_location": "<preferred work city/region as written. Labels: Preferred Location, \
+Location Preference, Open to relocation. If value is 'OPEN' or 'Anywhere', return that value. \
+Null if not stated.>",
+    "marital_status": "<same as personal.marital_status — fill from either section>",
+    "languages_known": "<same as personal.languages_known — human languages only>",
+    "nationality": "<same as personal.nationality>",
+    "blood_group": "<same as personal.blood_group>",
+    "gender": "<same as personal.gender>",
+    "date_of_birth": "<same as personal.date_of_birth — YYYY-MM-DD>"
   }
 }
 
-EXTRACTION RULES — contact:
-- Scan the ENTIRE text; contact details may appear at the top, bottom, header, or sidebar.
-- first_name / last_name: split the candidate's own name (not any employer's name).
-- full_name: the candidate's complete name exactly as written (not a company name).
-- email: look for the pattern word@domain.tld — take the first one as primary.
-- phone: accept formats like +91-9876543210, (800) 555-1234, 9876543210. \
-  Reject salary figures (e.g. 12,00,000) and years (e.g. 2019).
-- current_location: labels to look for: "Location", "Address", "City", "Based in", \
-  "Residing at", "Place". If the value is "Open to relocate" or "Anywhere", return null.
-- linkedin_url: extract the full URL starting with http or linkedin.com/in/…
-- web_address: GitHub, portfolio, personal site — NOT the LinkedIn URL.
-
-EXTRACTION RULES — personal:
-- Personal details often appear in a "Personal Details", "Personal Information", \
-  "Bio-Data", or "Declaration" section, but may also appear in a sidebar or footer.
-- date_of_birth: convert any date format to YYYY-MM-DD. Labels: "DOB", "Date of Birth", "Born on".
-- gender: normalise exactly to "Male", "Female", or "Other".
-- aadhar_number: 12 digits, may be written as "XXXX XXXX XXXX".
-- pan_number: exactly 10 alphanumeric characters (e.g. ABCDE1234F).
-- languages_known: Extract ONLY spoken/written human languages (e.g. English, Hindi, Tamil, French). \
-  DO NOT extract programming/scripting languages (Java, Python, SQL, C++, etc.).
-- marital_status: normalise to one of Single / Married / Divorced / Widowed.
-
-EXTRACTION RULES — professional_meta:
-- Scan the ENTIRE text including headers, footers, sidebars, and personal detail sections.
-- current_ctc: look for "Current CTC", "CTC", "Current Salary", "Present Salary", "Package".
-- expected_ctc: look for "Expected CTC", "Expected Salary", "Desired CTC", "Salary Expectation".
-- notice_period: look for "Notice Period", "Availability", "Joining Time", "Can join in".
-- industry: infer from job titles and companies if not explicitly stated.
-- preferred_location: look for "Preferred Location", "Location Preference", "Open to relocation".
-
-GENERAL RULES:
-- DO NOT invent, guess, or infer any value. If a field is not in the text, return null.
+CRITICAL RULES — read before extracting:
+1. Return ONLY the JSON object above. No text before or after it.
+2. Every field must be present. Use null (not empty string, not "N/A") when absent.
+3. DO NOT fabricate, guess, or infer values not explicitly in the text.
+4. NAME SPLITTING: for Indian 3-word names (Given Middle Surname), first_name = first word, \
+   last_name = remaining words. E.g. 'Nitesh Kumar Singh' → first='Nitesh', last='Kumar Singh'.
+5. PHONE vs SALARY: phone numbers have 10 digits (India) or include a + prefix. \
+   Salary figures like 12,00,000 or 15,00,000 are NOT phone numbers — never return them as phone.
+6. LANGUAGES: only spoken human languages in languages_known. Never include Java, Python, SQL, etc.
 
 Resume text (complete):
 """
 
 PROMPT_CHUNK_B = """\
-You are an expert resume parser. Read the complete resume text below and extract \
-skills, certifications, awards, professional summary, and projects. \
-Return ALL five sections in a single JSON object.
+You are a precise resume data extraction engine. Your ONLY job is to read the resume \
+text below and output a single valid JSON object — no prose, no markdown, no explanation.
 
-OUTPUT FORMAT — return ONLY a single valid JSON object, no other text:
+OUTPUT FORMAT — return ONLY this JSON structure, nothing else:
 {
   "skills": {
-    "primary_skills": ["<top 5-10 core skills — most prominent in the resume>"],
-    "technical_skills": ["<programming languages, frameworks, databases, tools, platforms, software>"],
-    "general_skills": ["<soft skills, domain knowledge, methodologies, management skills>"],
-    "all_skills": ["<EVERY skill found — union of the above three lists>"]
+    "primary_skills": ["<5-10 core skills — use what is listed in 'Key Skills', 'Core Competencies', \
+'Areas of Expertise', or 'Primary Skills' sections. If no explicit section, pick the 5-10 most \
+frequently mentioned skills across the ENTIRE text. Preserve exact capitalisation: 'JavaScript', \
+'AWS', 'Primavera P6'. Empty array [] if nothing found.>"],
+    "technical_skills": ["<ALL technical items: programming languages, frameworks, libraries, \
+databases, cloud platforms (AWS, Azure, GCP), DevOps/CI-CD tools, software (SAP, Primavera, \
+AutoCAD, MS Project), testing tools, IDEs. Do NOT include soft skills here. \
+Preserve exact capitalisation. [] if none found.>"],
+    "general_skills": ["<ALL non-technical skills: soft skills (Leadership, Communication, \
+Teamwork), methodologies (Agile, Scrum, Six Sigma, PMP), domain expertise (Project Management, \
+HSE Management, Supply Chain). Do NOT include programming tools here. [] if none found.>"],
+    "all_skills": ["<deduplicated UNION of the three arrays above — every unique skill \
+from primary + technical + general. No duplicates. [] if none found.>"]
   },
   "certifications": [
     {
-      "name": "<full certification name exactly as written>",
-      "issuer": "<issuing organisation or null>"
+      "name": "<full certification name EXACTLY as written — e.g. \
+'Post Graduate Diploma in Thermal Energy', \
+'Professional course certification in Primavera P6 project management', \
+'AWS Certified Solutions Architect — Associate'>",
+      "issuer": "<issuing organisation EXACTLY as written — e.g. \
+'JSW Energy Centre of Excellence', 'Synergy School of Business Skills, Chandigarh', \
+'Amazon Web Services'. Null if not stated.>"
     }
   ],
   "awards": [
     {
-      "name": "<award or achievement name exactly as written>",
-      "year": "<year as written e.g. 2022, or null>"
+      "name": "<award/achievement name EXACTLY as written>",
+      "year": "<4-digit year as a string, e.g. '2022'. Null if not stated.>"
     }
   ],
-  "summary": "<2-sentence professional summary>",
+  "summary": "<2-sentence professional summary (25-60 words). \
+RULE 1: If the resume has an explicit 'Profile Summary', 'Career Objective', 'Professional Summary', \
+or 'About Me' section, paraphrase it into 2 tight sentences. \
+RULE 2: If no explicit summary exists, write 2 sentences using ONLY the candidate's actual \
+role, years of experience, and top skills found in the text. \
+Do NOT mention the candidate's name. Write in third-person present tense. \
+Do NOT fabricate achievements or skills not in the text.>",
   "projects": [
     {
-      "name": "<full project name exactly as written>",
-      "duration": "<project duration or date range as written, or null>",
-      "description": "<one concise sentence describing the project and technologies used>"
+      "name": "<full project name EXACTLY as written>",
+      "duration": "<date range or duration as written, e.g. 'Dec-2019 to Sept-2020'. Null if not stated.>",
+      "description": "<one sentence describing the project based ONLY on what is written. \
+Do NOT invent technologies or outcomes not mentioned in the text.>"
     }
   ]
 }
 
-EXTRACTION RULES — skills:
-- Scan the ENTIRE text — skills appear in "Skills", "Technical Skills", "IT Skills", \
-  "Core Competencies", "Areas of Expertise", "Technologies", "Tools", \
-  but ALSO embedded in job descriptions, project descriptions, and summary paragraphs.
-- primary_skills: top 5-10 most prominent skills based on: \
-  (a) explicitly listed in a "Key Skills" or "Primary Skills" section, \
-  (b) mentioned most frequently, or (c) highlighted in the summary/objective.
-- technical_skills: all technologies — languages, frameworks, libraries, databases, \
-  cloud platforms, DevOps tools, IDEs, testing tools, etc.
-- general_skills: soft skills ("Leadership"), methodologies ("Agile", "Scrum"), \
-  and domain expertise ("Project Management").
-- all_skills: deduplicated union of primary + technical + general.
-- Copy skill names exactly as written (preserve capitalisation like "JavaScript", "AWS").
-- If no skills found, return empty arrays [].
-
-EXTRACTION RULES — certifications:
-- Scan the ENTIRE text — may appear under "Certifications", "Certificates", "Courses", "Training".
-- Include vendor certs (AWS, Azure, GCP, Salesforce, Oracle, Microsoft, Cisco, PMP, etc.) \
-  and named online courses (Coursera, Udemy, edX, NPTEL, etc.).
-- DO NOT include academic degrees (B.Tech, MBA, etc.) — those belong in education.
-- issuer: the organisation that issues the certificate. Use null if not stated.
-- If none found, return [].
-
-EXTRACTION RULES — awards:
-- Scan the ENTIRE text — may appear under "Awards", "Honours", "Recognitions", \
-  "Achievements", "Scholarships", "Accomplishments", or as bullet points in job sections.
-- Include named awards, scholarships, prizes, "Employee of the Month/Year", patents.
-- DO NOT include certifications (e.g. AWS, Salesforce) here.
-- year: 4-digit integer as string. Use null if not stated.
-- If none found, return [].
-
-EXTRACTION RULES — summary:
-- Task 1: If the resume contains an explicit professional summary, objective, or profile \
-  statement, extract it verbatim (or lightly paraphrase to 2 sentences).
-- Task 2: If no explicit summary exists, compose a 2-sentence summary based SOLELY \
-  on the candidate's role, years of experience, and top skills found in the text.
-- Do NOT mention the candidate's name. Write in third-person present tense.
-- The summary must be 25-60 words.
-
-EXTRACTION RULES — projects:
-- Scan the ENTIRE text — may appear under "Projects", "Key Projects", "Personal Projects", \
-  "Academic Projects", "Project Experience", or embedded in job descriptions.
-- Extract EVERY distinct named project.
-- description: one sentence based ONLY on what is written.
-- If no projects found, return [].
-
-GENERAL RULES:
-- DO NOT invent values. If a field is absent, return null or [].
+CRITICAL RULES — read before extracting:
+1. Return ONLY the JSON object above. No text before or after it.
+2. Absent fields → null (strings/objects) or [] (arrays). Never use "" or "N/A".
+3. DO NOT fabricate skills, certifications, or projects not present in the text.
+4. SKILLS DEDUPLICATION: if a skill appears in technical_skills, do not repeat it in general_skills. \
+   all_skills must be the union with no duplicates.
+5. CERTIFICATIONS vs EDUCATION: academic degrees (B.Tech, MBA, B.A., 12th, Diploma) are NOT \
+   certifications. Only include named professional/vendor/course certificates.
+6. AWARDS vs CERTIFICATIONS: a certificate course is a certification, not an award. \
+   Awards are prizes, recognition, 'Employee of the Year', scholarships, contest wins.
+7. PROJECTS: include ONLY named, discrete projects. A job role description is NOT a project \
+   unless it has a distinct project name.
 
 Resume text (complete):
 """
 
 PROMPT_CHUNK_C = """\
-You are an expert resume parser. Read the complete resume text below and extract \
-ALL work experience entries AND all formal academic qualifications. \
-Return both sections in a single JSON object.
+You are a precise resume data extraction engine. Your ONLY job is to read the resume \
+text below and output a single valid JSON object — no prose, no markdown, no explanation.
 
-OUTPUT FORMAT — return ONLY a single valid JSON object, no other text:
+OUTPUT FORMAT — return ONLY this JSON structure, nothing else:
 {
   "experience": {
     "experience": [
       {
-        "company": "<employer/company name exactly as written>",
-        "title": "<job title/designation exactly as written>",
-        "duration": "<start date – end date as written, e.g. Jan 2020 – Present>",
-        "description": "<one concise sentence summarising responsibilities and achievements>",
-        "department": "<department or team name, or null>"
+        "company": "<DIRECT EMPLOYER name exactly as written — the organisation that pays \
+the candidate. NOT a client name, NOT a project client, NOT a site name. \
+E.g. 'ISGEC HEAVY ENGINEERING LIMITED', 'Excellent Projects (I) Pvt. Ltd.', 'Infosys Ltd.'. \
+If the resume shows 'Organization: TCS | Client: Citibank', company = 'TCS'.>",
+        "title": "<job title/designation EXACTLY as written — e.g. 'Sr. Planning Engineer', \
+'Scaffolding Supervisor', 'Software Engineer'. NOT a department or project name.>",
+        "duration": "<date range EXACTLY as written — e.g. 'Mar-2022 to Present', \
+'Jan 2020 – Dec 2022', 'Apr 2015 to Mar 2017'. Keep 'Present'/'Current' as-is. \
+If only one date appears, use it as the end date. Null if no dates found.>",
+        "description": "<ONE sentence summarising what the candidate actually DID in this role, \
+based ONLY on bullet points or text written about this role. \
+If no description is written (e.g. the resume only lists company + title + dates), \
+write: 'Worked as [title] at [company] during [duration].' — do NOT invent responsibilities.>",
+        "department": "<department or team name if explicitly stated, else null>"
       }
     ],
-    "total_years_of_experience": "<numeric decimal e.g. 5.5, or null>",
-    "number_of_companies": "<integer count of distinct employers, or null>",
-    "current_company": "<name of the current or most recent employer, or null>",
-    "current_designation": "<current or most recent job title, or null>",
-    "current_ctc": "<current salary/CTC exactly as written e.g. '12 LPA', '₹15,00,000', or null>",
-    "expected_ctc": "<expected salary/CTC exactly as written, or null>",
-    "notice_period": "<notice period exactly as written e.g. '30 days', '2 months', 'Immediate', or null>",
-    "current_employment_status": "<Employed | Unemployed | Freelancer, or null>",
-    "industry": "<primary industry/domain the candidate works in, or null>",
-    "preferred_location": "<preferred work location as written, or null>"
+    "total_years_of_experience": "<RULE 1 — HIGHEST PRIORITY: scan for explicit phrases like \
+'X years of experience', 'X+ years', 'over X years', 'X.X years of professional experience'. \
+If found, use EXACTLY that number as a float. E.g. '9+ years' → 9.0, '4.2 years' → 4.2. \
+RULE 2 — only if Rule 1 finds nothing: sum the EMPLOYER tenure (not project durations). \
+Treat 'Present'/'Current'/'Till Date' as 2025. Round to 1 decimal. \
+Null if no experience found.>",
+    "number_of_companies": "<Count ONLY organisations where the candidate held a direct \
+employment role (has a job title). DO NOT count client organisations, project sites, or \
+deployment locations. Example: 'Excellent Projects (I) Pvt. Ltd.' with 8 client site \
+deployments = 1 company. 'Infosys | Client: Citibank' = 1 company (Infosys). \
+Null if no experience found.>",
+    "current_company": "<The EMPLOYER from the most recent experience entry — the one with \
+'Present'/'Current' or the latest end date. EXACTLY as written. Null if not found.>",
+    "current_designation": "<Job title from the most recent experience entry. \
+If no title in experience, look at the first 1-6 words of the resume in all-caps or \
+title-case — if it is NOT a section header (not 'Summary', 'Skills', 'Experience', \
+'Education', 'Profile', 'Objective', 'Resume', 'CV', 'Curriculum', 'Vitae'), treat it \
+as the current designation. Null if not found.>",
+    "current_ctc": "<current salary/CTC EXACTLY as written. Labels: Current CTC, CTC, \
+Salary, Package, Expected Salary. E.g. '12,00,000-15,00,000 (Negotiable) PER ANNUM'. \
+Null if not found.>",
+    "expected_ctc": "<expected salary EXACTLY as written. Labels: Expected CTC, Expected Salary, \
+Desired CTC. Null if not found.>",
+    "notice_period": "<exactly as written. Labels: Notice Period, Availability, Joining Time, \
+Can join in. E.g. '30 days', '2 months', 'Immediate'. Null if not found.>",
+    "current_employment_status": "<EXACTLY one of: Employed | Unemployed | Freelancer. \
+'Employed' if the latest role shows 'Present' or 'Current'. \
+'Unemployed' if ALL roles have a past end date. \
+'Freelancer' if the candidate explicitly states freelance/self-employed work. \
+Null if cannot determine.>",
+    "industry": "<primary industry/sector. Infer from job titles and company names if not \
+explicitly stated. E.g. 'Oil & Gas', 'Construction', 'Information Technology', \
+'Banking & Finance', 'Healthcare', 'Manufacturing'. Null if genuinely unclear.>",
+    "preferred_location": "<preferred work location as written. Labels: Preferred Location, \
+Location Preference, Open to relocation. If value is 'OPEN' or 'Anywhere', keep it as-is. \
+Null if not stated.>"
   },
   "education": {
     "education": [
       {
-        "institution": "<college, university, or school name exactly as written>",
-        "degree": "<degree title e.g. B.Tech, M.Sc, MBA, Ph.D, 12th, 10th>",
-        "field_of_study": "<subject/discipline/branch e.g. Computer Science, Finance>",
-        "start_year": "<4-digit integer or null>",
-        "end_year": "<4-digit integer or null>",
-        "grade": "<CGPA, GPA, percentage, or division as written, or null>"
+        "institution": "<college, university, or school name EXACTLY as written>",
+        "degree": "<degree title EXACTLY as written — e.g. 'B.Tech', 'M.Sc', 'MBA', \
+'B.A', 'Post Graduate Diploma', 'Ph.D', '12th', '10th'>",
+        "field_of_study": "<subject/discipline/branch — e.g. 'Mechanical Engineering', \
+'Computer Science', 'Thermal Energy', 'Commerce'. Null if not stated.>",
+        "start_year": "<4-digit integer start year. Null if not stated.>",
+        "end_year": "<4-digit integer end/completion year. If only one year shown, \
+put it here. Null if not stated.>",
+        "grade": "<CGPA, GPA, percentage, or division EXACTLY as written — e.g. \
+'8.5 CGPA', '75%', 'First Class', 'Distinction'. Null if not stated.>"
       }
     ],
-    "highest_degree": "<highest academic qualification e.g. Ph.D | M.Tech | MBA | B.Tech | Diploma | 12th | 10th, or null>",
-    "qualification_1": "<most recent/highest degree short form e.g. MBA, M.Tech>",
-    "qualification_1_type": "<Post Graduation | Graduation | Diploma | 12th | 10th>",
-    "institute_1": "<institution for qualification_1>",
-    "qualification_2": "<second qualification short form e.g. B.Tech, B.Sc>",
-    "qualification_2_type": "<Post Graduation | Graduation | Diploma | 12th | 10th>",
-    "institute_2": "<institution for qualification_2>",
-    "education_detail": "<one-line summary e.g. 'MBA from IIM Ahmedabad (2020), B.Tech from IIT Delhi (2018)'>"
+    "highest_degree": "<MOST ADVANCED degree found — use standard short form: \
+Ph.D | M.Tech | M.Sc | MBA | MCA | PGDM | Post Graduation | B.Tech | B.Sc | B.A | \
+BCA | B.Com | Diploma | 12th | 10th. Null if no education found.>",
+    "qualification_1": "<highest/most recent degree short form — e.g. 'MBA', 'M.Tech', \
+'PG Diploma', 'B.Tech', 'B.A'. Null if no education.>",
+    "qualification_1_type": "<EXACTLY one of: Post Graduation | Graduation | Diploma | 12th | 10th. \
+Ph.D/M.Tech/MBA/MCA/PGDM/Post Graduate Diploma → 'Post Graduation'; \
+B.Tech/B.Sc/BCA/B.Com/B.A/BE → 'Graduation'; \
+Diploma/ITI → 'Diploma'; 12th/HSC/Intermediate → '12th'; 10th/SSC/Matriculation → '10th'.>",
+    "institute_1": "<institution for qualification_1 EXACTLY as written>",
+    "qualification_2": "<second qualification short form. Null if only one qualification.>",
+    "qualification_2_type": "<type for qualification_2 — same enum as qualification_1_type. \
+Null if only one qualification.>",
+    "institute_2": "<institution for qualification_2. Null if only one qualification.>",
+    "education_detail": "<concise one-line summary of top 2-3 qualifications — \
+e.g. 'B.A from Jai Prakash University Chapra (2011), 12th from B.S.E. Board Patna (2008)'. \
+Null if no education found.>"
   }
 }
 
-EXTRACTION RULES — experience:
-- Scan the ENTIRE text — experience entries may appear under "Work Experience", \
-  "Professional Experience", "Employment History", "Career History", "Work History", \
-  or sometimes under "Projects" when the resume is project-based.
-- Extract EVERY job/role listed — do not skip older or shorter ones.
-- Order entries from MOST RECENT to OLDEST (place ongoing/Present roles first).
-- company: employer's full name (not a product name or technology name).
-- title: the exact designation/job title.
-- duration: copy dates exactly as written. If "Present" or "Current" appears, keep it.
-- description: write exactly ONE sentence summarising what the candidate did in that role, \
-  based ONLY on what is stated in the text. Do not repeat the company name.
-- total_years_of_experience: \
-  RULE 1 (highest priority): scan the text for any phrase like "X years of experience", \
-  "X+ years", "over X years", "X.X years of professional experience". If found, use \
-  EXACTLY that number as a float (e.g. "5 years" → 5.0, "4.2 years" → 4.2). \
-  RULE 2 (only if no explicit statement found): calculate from the earliest employer \
-  start date to the latest end date (treat "till date"/"present"/"current" as 2024); \
-  round to 1 decimal place. \
-  DO NOT add up project durations or client engagement periods — use employer tenures only.
-- number_of_companies: count ONLY companies where the candidate held a direct employment role \
-  (with a Designation/Title). Do NOT count "Client" fields or project clients. \
-  Example: Organization=Infosys, Client=Citibank → count only Infosys.
-- current_employment_status: infer "Employed" if the latest role says "Present" or "Current"; \
-  "Unemployed" if all roles have end dates in the past; "Freelancer" if stated.
-- current_ctc / expected_ctc: look for "CTC", "Current CTC", "Salary", "Expected CTC", "Package".
-- notice_period: look for "Notice Period", "Joining Time", "Available from".
-- preferred_location: look for "Preferred Location", "Location Preference", "Open to".
-- current_designation: use the title from the most recent experience entry. \
-  If no experience entries have an explicit title, look at the FIRST LINE of the resume — \
-  if it is 1–6 words in all-caps or title-case and is NOT a section header word \
-  (not "Summary", "Skills", "Experience", "Education", "Profile", "Objective", \
-  "Resume", "Curriculum", "Vitae", "CV"), treat it as the job title.
-- If no experience found, return "experience": [].
-
-EXTRACTION RULES — education:
-- Scan the ENTIRE text — may appear under "Education", "Academic Background", \
-  "Qualifications", "Academic Details", or degree info in a summary/objective.
-- Include ALL formal academic degrees: B.E., B.Tech, B.Sc, B.Com, B.A., BCA, MCA, \
-  M.Tech, M.Sc, M.Com, MBA, PGDM, Post Graduate Diploma, Ph.D, Diploma, 12th/HSC, 10th/SSC.
-- DO NOT include professional certifications — those belong in certifications.
-- start_year / end_year: 4-digit integers. If only one year shown, put it in end_year.
-- grade: accept CGPA, GPA, percentage, or division (e.g. First Class, Distinction).
-- highest_degree: the most advanced degree found — use the standard short form.
-- qualification_1_type / qualification_2_type: one of \
-  "Post Graduation", "Graduation", "Diploma", "12th", "10th". \
-  (Ph.D, M.Tech, MBA, MCA → "Post Graduation"; B.Tech, B.Sc, BCA, B.Com → "Graduation"; \
-   Diploma → "Diploma"; 12th/HSC → "12th"; 10th/SSC → "10th")
-- education_detail: concise one-line string combining degree + institution (+ year) \
-  for the top 2-3 qualifications.
-- Order education entries from MOST RECENT to OLDEST.
-- If no formal education found, return "education": [].
-
-GENERAL RULES:
-- DO NOT invent companies, titles, dates, salaries, degrees, or descriptions.
+CRITICAL RULES — read before extracting:
+1. Return ONLY the JSON object above. No text before or after it.
+2. Absent fields → null (not "", not "N/A", not "Not mentioned"). Arrays → [].
+3. DO NOT fabricate companies, titles, dates, salaries, degrees, or descriptions.
+4. EMPLOYER vs CLIENT: Many resumes show 'Organization: X | Client: Y' or a table with \
+   'Contractor | Period | Client Site'. The EMPLOYER is the organisation that employs the \
+   candidate (X). The client/site is where they were deployed. Only count employers for \
+   number_of_companies. Each distinct employer = 1 company regardless of client deployments.
+5. EXPERIENCE ORDERING: most recent first. Ongoing roles ('Present'/'Current') come first.
+6. EXPERIENCE DESCRIPTIONS: if the resume provides bullet points for a role, summarise \
+   them in one sentence. If NO bullet points exist (just company + title + dates), write \
+   'Worked as [title] at [company] ([duration]).' — do NOT invent duties.
+7. EDUCATION: include ONLY formal academic degrees. Certificate courses and professional \
+   certifications DO NOT belong here (they go in certifications in Chunk B).
+8. QUALIFICATION TYPES: strictly use one of Post Graduation | Graduation | Diploma | 12th | 10th.
 
 Resume text (complete):
 """
@@ -450,9 +450,9 @@ Resume text (complete):
 # (chunk_name, prompt_template, max_tokens)
 # ---------------------------------------------------------------------------
 CHUNKS = [
-    ("chunk_a", PROMPT_CHUNK_A, 950),
-    ("chunk_b", PROMPT_CHUNK_B, 2100),
-    ("chunk_c", PROMPT_CHUNK_C, 2600),
+    ("chunk_a", PROMPT_CHUNK_A, 1100),
+    ("chunk_b", PROMPT_CHUNK_B, 2300),
+    ("chunk_c", PROMPT_CHUNK_C, 2800),
 ]
 
 
@@ -836,11 +836,25 @@ async def parse_resume(text: str) -> dict:
     award_data    = parsed.get("awards", {})
     summary_data  = parsed.get("summary", {})
 
+    # Build spoken_languages as a list (split the comma string the LLM returns)
+    languages_raw = personal.get("languages_known")
+    if isinstance(languages_raw, list):
+        spoken_languages = [l.strip() for l in languages_raw if l.strip()]
+    elif isinstance(languages_raw, str) and languages_raw:
+        import re as _re
+        spoken_languages = [
+            p.strip() for p in _re.split(r'[,;/]|\band\b', languages_raw, flags=_re.IGNORECASE)
+            if p.strip()
+        ]
+    else:
+        spoken_languages = []
+
     return {
         # Contact
         "first_name":         contact.get("first_name"),
         "last_name":          contact.get("last_name"),
         "name":               contact.get("full_name"),
+        "full_name":          contact.get("full_name"),
         "email":              contact.get("email"),
         "alternate_email":    contact.get("alternate_email"),
         "phone":              contact.get("phone"),
@@ -859,7 +873,8 @@ async def parse_resume(text: str) -> dict:
         "pan_number":         personal.get("pan_number"),
         "passport_number":    personal.get("passport_number"),
         "blood_group":        personal.get("blood_group"),
-        "languages_known":    personal.get("languages_known"),
+        "languages_known":    languages_raw if isinstance(languages_raw, str) else ", ".join(spoken_languages),
+        "spoken_languages":   spoken_languages,
         "marital_status":     personal.get("marital_status"),
 
         # Skills (categorized)
@@ -871,6 +886,7 @@ async def parse_resume(text: str) -> dict:
         # Experience + professional details
         "experience":                exp_data.get("experience", []),
         "total_years_of_experience": exp_data.get("total_years_of_experience"),
+        "years_of_experience":       exp_data.get("total_years_of_experience"),
         "number_of_companies":       exp_data.get("number_of_companies"),
         "current_company":           exp_data.get("current_company"),
         "current_designation":       exp_data.get("current_designation"),

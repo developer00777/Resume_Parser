@@ -1,4 +1,4 @@
-from typing import Optional
+from typing import Optional, List
 from pydantic import BaseModel, Field
 
 
@@ -36,21 +36,43 @@ class Award(BaseModel):
 
 
 class ResumeScore(BaseModel):
-    # ── 7-category weighted score matrix (each raw score 0–10, weighted to 100) ──
-    overall: int = Field(0, ge=0, le=100, description="Overall weighted score out of 100")
-
-    # Individual category raw scores (0–10)
-    contact_information: int = Field(0, ge=0, le=10, description="Contact info completeness (weight 5%)")
-    professional_summary: int = Field(0, ge=0, le=10, description="Summary clarity and strength (weight 15%)")
-    work_experience: int = Field(0, ge=0, le=10, description="Experience structure and impact (weight 25%)")
-    skills: int = Field(0, ge=0, le=10, description="Skills relevance and categorization (weight 20%)")
-    education_certifications: int = Field(0, ge=0, le=10, description="Education and certifications (weight 10%)")
-    achievements_projects: int = Field(0, ge=0, le=10, description="Projects, awards, measurable results (weight 15%)")
-    format_design: int = Field(0, ge=0, le=10, description="Layout, readability, formatting (weight 10%)")
-
-    # Interpretation band
-    grade: str = Field("Poor", description="Excellent / Good / Average / Poor")
+    overall: int = Field(0, ge=0, le=100)
+    contact_information: int = Field(0, ge=0, le=10)
+    professional_summary: int = Field(0, ge=0, le=10)
+    work_experience: int = Field(0, ge=0, le=10)
+    skills: int = Field(0, ge=0, le=10)
+    education_certifications: int = Field(0, ge=0, le=10)
+    achievements_projects: int = Field(0, ge=0, le=10)
+    format_design: int = Field(0, ge=0, le=10)
+    grade: str = Field("Poor")
     remarks: str | None = None
+
+
+# ── Client-1 response schema ──────────────────────────────────────────────────
+# Field names match the client's Salesforce org API names exactly.
+
+class ClientResumeData(BaseModel):
+    # Identity
+    Name: str | None = None                          # full name (Formula field)
+    FullName__c: str | None = None                   # complete official name
+    Nationality__c: str | None = None
+    Date_of_Birth__c: str | None = None              # YYYY-MM-DD
+    Years_of_Experience__c: float | None = None      # numeric years
+    Current_Location__c: str | None = None
+    CurrentDesignation__c: str | None = None
+    Email: str | None = None
+    PhoneNumber__c: str | None = None                # primary mobile
+    SCSCHAMPS__PhoneNumber__c: str | None = None     # secondary/alternate phone
+    CurrentCompany__c: str | None = None
+    Consultant__c: None = None                       # always null — assigned in SF
+    Type_1__c: str | None = None                     # Permanent | Contract | Freelance
+    Spoken_Language__c: List[str] = Field(default_factory=list)  # multi-select array
+
+
+class ClientParseResponse(BaseModel):
+    success: bool
+    processing_time_ms: float
+    data: ClientResumeData
 
 
 # ── Standard web-app response ─────────────────────────────────────────────────
@@ -82,13 +104,13 @@ class ResumeData(BaseModel):
     marital_status: str | None = None
 
     # Skills (categorized)
-    skills: str | None = None           # comma-separated string (all skills)
-    primary_skills: str | None = None   # comma-separated primary skills
-    technical_skills: str | None = None # comma-separated technical skills
-    general_skills: str | None = None   # comma-separated general/soft skills
+    skills: str | None = None
+    primary_skills: str | None = None
+    technical_skills: str | None = None
+    general_skills: str | None = None
 
     # Experience
-    experience: str | None = None       # newline-separated: "Company | Title | Duration | Description"
+    experience: str | None = None
     total_years_of_experience: float | None = None
     number_of_companies: int | None = None
     current_company: str | None = None
@@ -101,7 +123,7 @@ class ResumeData(BaseModel):
     preferred_location: str | None = None
 
     # Education
-    education: str | None = None        # newline-separated: "Institution | Degree | Field | Year | Grade"
+    education: str | None = None
     highest_degree: str | None = None
     qualification_1: str | None = None
     qualification_1_type: str | None = None
@@ -112,14 +134,12 @@ class ResumeData(BaseModel):
     education_detail: str | None = None
 
     # Other
-    projects: str | None = None         # newline-separated: "Name | Duration | Description"
-    certifications: str | None = None   # newline-separated: "Name | Issuer"
-    awards: str | None = None           # newline-separated: "Name | Year"
+    projects: str | None = None
+    certifications: str | None = None
+    awards: str | None = None
     summary: str | None = None
     overall_score: int | None = None
     grade: str | None = None
-
-    # Full raw text extracted from the uploaded resume (PDF/DOCX)
     resume_text: str | None = None
 
 
@@ -130,109 +150,108 @@ class ParseResponse(BaseModel):
 
 
 # ── Salesforce SCSCHAMPS-mapped response ──────────────────────────────────────
-# Field names match Salesforce API names. Both SCSCHAMPS__*__c and custom *__c fields.
 
 class SalesforceResumeData(BaseModel):
-    # ── Contact / Identity ──────────────────────────────────────────────────
-    FirstName: str | None = None                  # FirstName
-    LastName: str | None = None                   # LastName (required in SF)
-    Name: str | None = None                       # Full Name
-    Email: str | None = None                      # Email
-    Title: str | None = None                      # SCSCHAMPS__Title__c
-    AadharNumber: str | None = None               # AadharNumber__c / SCSCHAMPS__AadharNumber__c
-    AlternateEmail: str | None = None             # AlternateEmail__c / SCSCHAMPS__AlternateEmail__c
-    AlternatePhoneNumber: str | None = None       # AlternatePhoneNumber__c / SCSCHAMPS__AlternatePhoneNumber__c
-    Phone: str | None = None                      # SCSCHAMPS__Phone__c
-    PhoneNumber: str | None = None                # PhoneNumber__c / SCSCHAMPS__PhoneNumber__c
-    MobilePhone: str | None = None                # MobilePhone
-    LinkedIn_URL: str | None = None               # LinkedinURL__c / SCSCHAMPS__LinkedIn_URL__c
-    Web_address: str | None = None                # SCSCHAMPS__Web_address__c
-    DateOfBirth: str | None = None                # DateOfBirth__c / SCSCHAMPS__DateOfBirth__c
-    Birthdate: str | None = None                  # Birthdate
-    Gender: str | None = None                     # Gender__c / SCSCHAMPS__Gender__c
-    Blood_Group: str | None = None                # Blood_Group__c
-    Father_s_Name: str | None = None              # Father_s_Name__c
-    MotherName: str | None = None                 # MotherName__c
-    Nationnality: str | None = None               # Nationnality__c (SF spelling)
-    PAN_Number: str | None = None                 # PAN_Number__c
-    Passport_Number: str | None = None            # Passport_Number__c
-    LanguagesKnown: str | None = None             # LanguagesKnown__c
+    # Contact / Identity
+    FirstName: str | None = None
+    LastName: str | None = None
+    Name: str | None = None
+    Email: str | None = None
+    Title: str | None = None
+    AadharNumber: str | None = None
+    AlternateEmail: str | None = None
+    AlternatePhoneNumber: str | None = None
+    Phone: str | None = None
+    PhoneNumber: str | None = None
+    MobilePhone: str | None = None
+    LinkedIn_URL: str | None = None
+    Web_address: str | None = None
+    DateOfBirth: str | None = None
+    Birthdate: str | None = None
+    Gender: str | None = None
+    Blood_Group: str | None = None
+    Father_s_Name: str | None = None
+    MotherName: str | None = None
+    Nationnality: str | None = None
+    PAN_Number: str | None = None
+    Passport_Number: str | None = None
+    LanguagesKnown: str | None = None
 
-    # ── Location ────────────────────────────────────────────────────────────
-    City: str | None = None                       # SCSCHAMPS__City__c
-    State: str | None = None                      # SCSCHAMPS__State__c
-    Current_Location: str | None = None           # Current_Location__c / SCSCHAMPS__Current_Location__c
-    Preferred_Location: str | None = None         # Preferred_Location__c / SCSCHAMPS__Preferred_Location__c
+    # Location
+    City: str | None = None
+    State: str | None = None
+    Current_Location: str | None = None
+    Preferred_Location: str | None = None
 
-    # ── Professional ────────────────────────────────────────────────────────
-    CurrentDesignation: str | None = None         # CurrentDesignation__c / SCSCHAMPS__CurrentDesignation__c
-    Designation: str | None = None                # SCSCHAMPS__Designation__c
-    Department: str | None = None                 # Department / SCSCHAMPS__Department__c
-    Company: str | None = None                    # SCSCHAMPS__Company__c
-    CurrentCompany: str | None = None             # CurrentCompany__c / SCSCHAMPS__CurrentCompany__c
-    CurrentDuration: float | None = None          # SCSCHAMPS__CurrentDuration__c (double)
-    Years_of_Experience: float | None = None      # Years_of_Experience__c / SCSCHAMPS__Years_of_Experience__c
-    No_of_companies_worked_in: int | None = None  # No_of_companies_worked_in__c
-    Current_Employment: str | None = None         # Current_Employment__c
-    Industry: str | None = None                   # Industry__c
+    # Professional
+    CurrentDesignation: str | None = None
+    Designation: str | None = None
+    Department: str | None = None
+    Company: str | None = None
+    CurrentCompany: str | None = None
+    CurrentDuration: float | None = None
+    Years_of_Experience: float | None = None
+    No_of_companies_worked_in: int | None = None
+    Current_Employment: str | None = None
+    Industry: str | None = None
 
-    # ── Skills ──────────────────────────────────────────────────────────────
-    Primary_Skills: str | None = None             # SCSCHAMPS__Primary_Skills__c
-    Technical_Skills: str | None = None           # SCSCHAMPS__Technical_Skills__c
-    General_Skills: str | None = None             # SCSCHAMPS__General_Skills__c
-    SkillList: str | None = None                  # SCSCHAMPS__SkillList__c / SkillList__c
-    Skill_List: str | None = None                 # Skill_List__c (AI)
-    AutoPopulate_Skillset: str | None = None      # SCSCHAMPS__AutoPopulate_Skillset__c (textarea)
-    Key_Skillsets_del: str | None = None          # SCSCHAMPS__Key_Skillsets_del__c
+    # Skills
+    Primary_Skills: str | None = None
+    Technical_Skills: str | None = None
+    General_Skills: str | None = None
+    SkillList: str | None = None
+    Skill_List: str | None = None
+    AutoPopulate_Skillset: str | None = None
+    Key_Skillsets_del: str | None = None
 
-    # ── Education ───────────────────────────────────────────────────────────
-    Education: str | None = None                  # Education__c
-    Highest_Degree: str | None = None             # Highest_Degree__c
-    education_start_year: int | None = None       # education_start_year__c
-    Education_End_Year: int | None = None         # Education_End_Year__c
-    Education_year: bool = False                  # Education_year__c (required boolean)
-    educationDetail: str | None = None            # educationDetail__c
-    Qualification_1: str | None = None            # Qualification_1__c
-    Qualification_1_Type: str | None = None       # Qualification_1_Type__c
-    Qualification_2: str | None = None            # Qualification_2__c
-    Qualification_2_Type: str | None = None       # Qualification_2_Type__c
-    Institute_1: str | None = None                # Institute_1__c
-    Institute_2: str | None = None                # Institute_2__c
-    Certification: str | None = None              # Certification__c
-    Awards: str | None = None                     # Awards__c
+    # Education
+    Education: str | None = None
+    Highest_Degree: str | None = None
+    education_start_year: int | None = None
+    Education_End_Year: int | None = None
+    Education_year: bool = False
+    educationDetail: str | None = None
+    Qualification_1: str | None = None
+    Qualification_1_Type: str | None = None
+    Qualification_2: str | None = None
+    Qualification_2_Type: str | None = None
+    Institute_1: str | None = None
+    Institute_2: str | None = None
+    Certification: str | None = None
+    Awards: str | None = None
 
-    # ── Compensation / Availability ─────────────────────────────────────────
-    Current_CTC: str | None = None                # Current_CTC__c / SCSCHAMPS__Current_CTC__c
-    Expected_CTC: str | None = None               # Expected_CTC__c / SCSCHAMPS__Expected_CTC__c
-    Notice_Period: str | None = None              # Notice_Period__c / SCSCHAMPS__Notice_Period__c
-    Available_To_Start: str | None = None         # SCSCHAMPS__Available_To_Start__c
+    # Compensation / Availability
+    Current_CTC: str | None = None
+    Expected_CTC: str | None = None
+    Notice_Period: str | None = None
+    Available_To_Start: str | None = None
 
-    # ── Resume Content ──────────────────────────────────────────────────────
-    ResumeRich: str | None = None                 # SCSCHAMPS__ResumeRich__c (HTML)
-    Resume: str | None = None                     # SCSCHAMPS__Resume__c (work details)
-    TextResume: str | None = None                 # TextResume__c (raw text)
-    Resume_URL: str | None = None                 # SCSCHAMPS__Resume_URL__c
-    Resume_Attachment_Id: str | None = None       # SCSCHAMPS__Resume_Attachment_Id__c
-    Date_Parsed_Text: str | None = None           # Date_Parsed_Text__c
+    # Resume Content
+    ResumeRich: str | None = None
+    Resume: str | None = None
+    TextResume: str | None = None
+    Resume_URL: str | None = None
+    Resume_Attachment_Id: str | None = None
+    Date_Parsed_Text: str | None = None
 
-    # ── Scoring ─────────────────────────────────────────────────────────────
-    Candidate_Score: int | None = None            # Candidate_Score__c
-    Resume_Score: float | None = None             # Resume_Score__c
-    resume_score: ResumeScore = ResumeScore()     # detailed breakdown
+    # Scoring
+    Candidate_Score: int | None = None
+    Resume_Score: float | None = None
+    resume_score: ResumeScore = ResumeScore()
 
-    # ── Candidate Meta (populated by Salesforce, not resume) ────────────────
-    Candidate_Status: str | None = None           # SCSCHAMPS__Candidate_Status__c
-    Status: str | None = None                     # Status__c
-    Background_Check: str | None = None           # SCSCHAMPS__Background_Check__c
-    Source: str | None = None                     # Source__c / SCSCHAMPS__Source__c
-    Talent_Id: str | None = None                  # SCSCHAMPS__Talent_Id__c
-    Job_Id: str | None = None                     # SCSCHAMPS__Job_Id__c
-    job: str | None = None                        # SCSCHAMPS__job__c
-    Lead: str | None = None                       # SCSCHAMPS__Lead__c
-    Recruiter: str | None = None                  # SCSCHAMPS__Recruiter__c
-    converted_from_lead: bool = False             # SCSCHAMPS__converted_from_lead__c
-    Ampliz_Contact: bool = False                  # SCSCHAMPS__Ampliz_Contact__c
-    Ampliz_Talent_Name: str | None = None         # SCSCHAMPS__Ampliz_Talent_Name__c
+    # Candidate Meta
+    Candidate_Status: str | None = None
+    Status: str | None = None
+    Background_Check: str | None = None
+    Source: str | None = None
+    Talent_Id: str | None = None
+    Job_Id: str | None = None
+    job: str | None = None
+    Lead: str | None = None
+    Recruiter: str | None = None
+    converted_from_lead: bool = False
+    Ampliz_Contact: bool = False
+    Ampliz_Talent_Name: str | None = None
 
 
 class SalesforceParseResponse(BaseModel):
@@ -277,6 +296,23 @@ class BulkSalesforceParseResponse(BaseModel):
     total_processing_time_ms: float
 
 
+class BulkClientParseItem(BaseModel):
+    filename: str
+    success: bool
+    data: Optional["ClientResumeData"] = None
+    error: Optional[str] = None
+    processing_time_ms: float = 0.0
+
+
+class BulkClientParseResponse(BaseModel):
+    success: bool
+    total: int
+    parsed: int
+    failed: int
+    results: list[BulkClientParseItem]
+    total_processing_time_ms: float
+
+
 class BulkJobStatus(BaseModel):
     job_id: str
     status: str  # "processing" | "completed" | "failed"
@@ -310,13 +346,11 @@ class ModelsResponse(BaseModel):
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 def _is_current_job(exp: dict) -> bool:
-    """Return True if the duration field suggests an ongoing role."""
     duration = (exp.get("duration") or "").lower()
     return any(kw in duration for kw in ("present", "current", "now", "till date", "ongoing"))
 
 
 def _extract_city(location: str | None) -> str | None:
-    """Best-effort: 'City, State' → 'City'."""
     if not location:
         return None
     parts = [p.strip() for p in location.split(",")]
@@ -324,7 +358,6 @@ def _extract_city(location: str | None) -> str | None:
 
 
 def _extract_state(location: str | None) -> str | None:
-    """Best-effort: 'City, State' → 'State'."""
     if not location:
         return None
     parts = [p.strip() for p in location.split(",")]
@@ -332,18 +365,14 @@ def _extract_state(location: str | None) -> str | None:
 
 
 def _parse_ctc_to_number(ctc_str: str | None) -> float | None:
-    """Try to extract a numeric value from a CTC string like '12 LPA', '₹15,00,000'."""
     if not ctc_str:
         return None
     import re
-    # Remove currency symbols and whitespace
     cleaned = re.sub(r'[₹$,\s]', '', ctc_str.upper())
-    # Try to find a number
     match = re.search(r'(\d+(?:\.\d+)?)', cleaned)
     if not match:
         return None
     value = float(match.group(1))
-    # Convert LPA/Lakhs to raw number
     if 'LPA' in cleaned or 'LAKH' in cleaned or 'LAC' in cleaned:
         value = value * 100000
     elif 'CR' in cleaned:
@@ -352,12 +381,82 @@ def _parse_ctc_to_number(ctc_str: str | None) -> float | None:
 
 
 def _parse_duration_years(duration_str: str | None) -> float | None:
-    """Extract numeric duration from strings like '2.5 years', '3 yrs'."""
     if not duration_str:
         return None
     import re
     match = re.search(r'(\d+(?:\.\d+)?)', str(duration_str))
     return float(match.group(1)) if match else None
+
+
+def _infer_candidate_type(parsed: dict) -> str | None:
+    """
+    Infer Permanent / Contract / Freelance from resume signals.
+    Returns None if no signal found.
+    """
+    status = (parsed.get("current_employment_status") or "").lower()
+    summary = (parsed.get("summary") or "").lower()
+    experience = parsed.get("experience", [])
+
+    # Explicit freelancer signals
+    freelance_kw = ("freelance", "freelancer", "self-employed", "independent consultant",
+                    "independent contractor", "sole proprietor")
+    if any(kw in status or kw in summary for kw in freelance_kw):
+        return "Freelance"
+
+    # Contract signals: short tenures across many companies, or explicit keywords
+    contract_kw = ("contract", "contractor", "temporary", "temp ", "on contract",
+                   "contractual", "fixed term", "fixed-term")
+    for kw in contract_kw:
+        if kw in status or kw in summary:
+            return "Contract"
+
+    # Check experience entries for contract-style descriptions
+    for exp in experience:
+        desc = (exp.get("description") or "").lower()
+        title = (exp.get("title") or "").lower()
+        if any(kw in desc or kw in title for kw in contract_kw):
+            return "Contract"
+
+    # Default to Permanent for employed candidates with stable tenures
+    if experience:
+        return "Permanent"
+
+    return None
+
+
+def _languages_to_list(languages_known: str | None) -> list[str]:
+    """Convert comma/semicolon-separated language string to a clean list."""
+    if not languages_known:
+        return []
+    import re
+    # Split on comma, semicolon, slash, or ' and '
+    parts = re.split(r'[,;/]|\band\b', languages_known, flags=re.IGNORECASE)
+    result = []
+    for part in parts:
+        cleaned = part.strip().strip(".")
+        if cleaned:
+            result.append(cleaned)
+    return result
+
+
+def map_to_client(parsed: dict) -> ClientResumeData:
+    """Map the internal parsed dict to the client-1 field schema."""
+    return ClientResumeData(
+        Name=parsed.get("name"),
+        FullName__c=parsed.get("name"),
+        Nationality__c=parsed.get("nationality"),
+        Date_of_Birth__c=parsed.get("date_of_birth"),
+        Years_of_Experience__c=parsed.get("total_years_of_experience"),
+        Current_Location__c=parsed.get("current_location"),
+        CurrentDesignation__c=parsed.get("current_designation"),
+        Email=parsed.get("email"),
+        PhoneNumber__c=parsed.get("phone"),
+        SCSCHAMPS__PhoneNumber__c=parsed.get("number"),
+        CurrentCompany__c=parsed.get("current_company"),
+        Consultant__c=None,
+        Type_1__c=_infer_candidate_type(parsed),
+        Spoken_Language__c=_languages_to_list(parsed.get("languages_known")),
+    )
 
 
 def map_to_salesforce(parsed: dict, raw_text: str | None = None) -> SalesforceResumeData:
@@ -374,20 +473,16 @@ def map_to_salesforce(parsed: dict, raw_text: str | None = None) -> SalesforceRe
     awards: list[dict] = parsed.get("awards", [])
     score = parsed.get("resume_score", {})
 
-    # Current company: prefer any entry marked as ongoing/present;
-    # otherwise fall back to the first entry (LLM is instructed to sort newest-first).
     current_exp = next(
         (e for e in experience if _is_current_job(e)),
         experience[0] if experience else {},
     )
 
-    # Build comma-separated skill list
     skill_list = ", ".join(skills) if skills else None
     primary_skill_list = ", ".join(primary_skills) if primary_skills else None
     tech_skill_text = "\n".join(technical_skills) if technical_skills else None
     general_skill_text = "\n".join(general_skills) if general_skills else None
 
-    # Build rich HTML summary from experience entries
     exp_html_parts = []
     for exp in experience:
         co = exp.get("company", "")
@@ -397,7 +492,6 @@ def map_to_salesforce(parsed: dict, raw_text: str | None = None) -> SalesforceRe
         exp_html_parts.append(f"<b>{ti}</b> at {co} ({du})<br/>{de}")
     resume_rich = "<br/><br/>".join(exp_html_parts) if exp_html_parts else parsed.get("summary")
 
-    # Build plain-text resume (work details)
     exp_text_parts = []
     for exp in experience:
         co = exp.get("company", "")
@@ -407,30 +501,21 @@ def map_to_salesforce(parsed: dict, raw_text: str | None = None) -> SalesforceRe
         exp_text_parts.append(f"{ti} at {co} ({du})\n{de}")
     resume_text = "\n\n".join(exp_text_parts) if exp_text_parts else None
 
-    # Certification text
     cert_text = ", ".join(c.get("name", "") for c in certifications if c.get("name")) or None
-
-    # Awards text
     awards_text = ", ".join(
         f"{a.get('name', '')}" + (f" ({a['year']})" if a.get('year') else "")
         for a in awards if a.get("name")
     ) or None
 
-    # Education fields
     edu_first = education[0] if education else {}
-    edu_second = education[1] if len(education) > 1 else {}
     edu_start_year = edu_first.get("start_year")
     edu_end_year = edu_first.get("end_year")
     has_edu_year = bool(edu_start_year or edu_end_year)
-
-    # Education summary string
     edu_str = parsed.get("highest_degree") or edu_first.get("degree")
 
-    # Score values
     score_obj = ResumeScore(**score) if isinstance(score, dict) else ResumeScore()
 
     return SalesforceResumeData(
-        # Contact / Identity
         FirstName=parsed.get("first_name"),
         LastName=parsed.get("last_name"),
         Name=parsed.get("name"),
@@ -454,14 +539,10 @@ def map_to_salesforce(parsed: dict, raw_text: str | None = None) -> SalesforceRe
         PAN_Number=parsed.get("pan_number"),
         Passport_Number=parsed.get("passport_number"),
         LanguagesKnown=parsed.get("languages_known"),
-
-        # Location
         Current_Location=parsed.get("current_location"),
         City=_extract_city(parsed.get("current_location")),
         State=_extract_state(parsed.get("current_location")),
         Preferred_Location=parsed.get("preferred_location"),
-
-        # Professional
         CurrentCompany=parsed.get("current_company") or current_exp.get("company"),
         CurrentDesignation=parsed.get("current_designation") or current_exp.get("title"),
         CurrentDuration=_parse_duration_years(current_exp.get("duration")),
@@ -472,8 +553,6 @@ def map_to_salesforce(parsed: dict, raw_text: str | None = None) -> SalesforceRe
         No_of_companies_worked_in=parsed.get("number_of_companies"),
         Current_Employment=parsed.get("current_employment_status"),
         Industry=parsed.get("industry"),
-
-        # Skills
         Primary_Skills=primary_skill_list,
         Technical_Skills=tech_skill_text,
         General_Skills=general_skill_text,
@@ -481,8 +560,6 @@ def map_to_salesforce(parsed: dict, raw_text: str | None = None) -> SalesforceRe
         Skill_List=primary_skill_list,
         AutoPopulate_Skillset=skill_list,
         Key_Skillsets_del=tech_skill_text,
-
-        # Education
         Education=edu_str,
         Highest_Degree=parsed.get("highest_degree"),
         education_start_year=edu_start_year,
@@ -497,19 +574,13 @@ def map_to_salesforce(parsed: dict, raw_text: str | None = None) -> SalesforceRe
         Institute_2=parsed.get("institute_2"),
         Certification=cert_text,
         Awards=awards_text,
-
-        # Compensation / Availability
         Current_CTC=parsed.get("current_ctc"),
         Expected_CTC=parsed.get("expected_ctc"),
         Notice_Period=parsed.get("notice_period"),
-
-        # Resume content
         ResumeRich=resume_rich,
         Resume=resume_text,
         TextResume=raw_text,
         Date_Parsed_Text=date.today().isoformat(),
-
-        # Scoring
         Candidate_Score=score_obj.overall,
         Resume_Score=float(score_obj.overall),
         resume_score=score_obj,

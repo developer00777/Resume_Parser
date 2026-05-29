@@ -11,8 +11,12 @@ from app.services.document import extract_text
 from app.services.llm import parse_resume
 from app.schemas.response import (
     ResumeData,
+    ClientResumeData,
+    ClientParseResponse,
     BulkParseResponse,
     BulkParseItem,
+    BulkClientParseResponse,
+    BulkClientParseItem,
     BulkJobStatus,
     BulkSalesforceParseResponse,
     BulkSalesforceParseItem,
@@ -20,6 +24,7 @@ from app.schemas.response import (
     ModelsResponse,
     ModelInfo,
     map_to_salesforce,
+    map_to_client,
 )
 
 logger = logging.getLogger(__name__)
@@ -184,6 +189,33 @@ async def _parse_one_sf(file: UploadFile, semaphore: asyncio.Semaphore) -> BulkS
         )
 
 
+async def _parse_one_client(file: UploadFile, semaphore: asyncio.Semaphore) -> BulkClientParseItem:
+    """Parse a single resume and return client-1 mapped fields (never raises)."""
+    start = time.time()
+    filename = file.filename or "unknown"
+    try:
+        async with semaphore:
+            text = await extract_text(file)
+            parsed = await parse_resume(text)
+        client_data = map_to_client(parsed)
+        elapsed_ms = round((time.time() - start) * 1000, 2)
+        return BulkClientParseItem(
+            filename=filename,
+            success=True,
+            data=client_data,
+            processing_time_ms=elapsed_ms,
+        )
+    except Exception as exc:
+        elapsed_ms = round((time.time() - start) * 1000, 2)
+        logger.error(f"Client parse: failed '{filename}': {exc}")
+        return BulkClientParseItem(
+            filename=filename,
+            success=False,
+            error=str(exc),
+            processing_time_ms=elapsed_ms,
+        )
+
+
 def _validate_files(files: list[UploadFile]) -> None:
     if not files:
         raise HTTPException(status_code=400, detail="No files provided.")
@@ -264,6 +296,47 @@ async def parse_salesforce(
     parsed_count = sum(1 for r in results if r.success)
 
     return BulkSalesforceParseResponse(
+        success=True,
+        total=len(results),
+        parsed=parsed_count,
+        failed=len(results) - parsed_count,
+        results=results,
+        total_processing_time_ms=total_ms,
+    )
+
+
+@router.post("/parse/client", response_model=BulkClientParseResponse)
+async def parse_client(
+    files: List[UploadFile] = File(..., description="1 to 15 resume files (PDF or DOCX)"),
+):
+    """
+    Parse 1 to 15 resume files and return client-1 mapped JSON for each.
+
+    Output fields match the client's Salesforce org schema:
+    Name, FullName__c, Nationality__c, Date_of_Birth__c, Years_of_Experience__c,
+    Current_Location__c, CurrentDesignation__c, Email, PhoneNumber__c,
+    SCSCHAMPS__PhoneNumber__c, CurrentCompany__c, Consultant__c, Type_1__c,
+    Spoken_Language__c (array).
+    """
+    _validate_files(files)
+    wall_start = time.time()
+    semaphore = asyncio.Semaphore(_BULK_CONCURRENCY)
+
+    try:
+        results: list[BulkClientParseItem] = await asyncio.wait_for(
+            asyncio.gather(*[_parse_one_client(f, semaphore) for f in files]),
+            timeout=_BULK_TIMEOUT,
+        )
+    except asyncio.TimeoutError:
+        raise HTTPException(
+            status_code=504,
+            detail=f"Parsing exceeded the {_BULK_TIMEOUT}s time limit. Try fewer or smaller files.",
+        )
+
+    total_ms = round((time.time() - wall_start) * 1000, 2)
+    parsed_count = sum(1 for r in results if r.success)
+
+    return BulkClientParseResponse(
         success=True,
         total=len(results),
         parsed=parsed_count,
