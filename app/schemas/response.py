@@ -65,7 +65,7 @@ class ClientResumeData(BaseModel):
     SCSCHAMPS__PhoneNumber__c: str | None = None     # secondary/alternate phone
     CurrentCompany__c: str | None = None
     Consultant__c: None = None                       # always null — assigned in SF
-    Type_1__c: str | None = None                     # Permanent | Contract | Freelance
+    Type_1__c: str | None = None                     # Graduate | Non Graduate
     Spoken_Language__c: List[str] = Field(default_factory=list)  # multi-select array
 
 
@@ -390,36 +390,40 @@ def _parse_duration_years(duration_str: str | None) -> float | None:
 
 def _infer_candidate_type(parsed: dict) -> str | None:
     """
-    Infer Permanent / Contract / Freelance from resume signals.
-    Returns None if no signal found.
+    Determine if the candidate is a Graduate or Non Graduate based on their
+    education. Any completed college/university degree (Bachelor's or above)
+    counts as Graduate; diploma-only, high-school-only, or no education
+    returns Non Graduate.
     """
-    status = (parsed.get("current_employment_status") or "").lower()
-    summary = (parsed.get("summary") or "").lower()
-    experience = parsed.get("experience", [])
+    education: list[dict] = parsed.get("education", [])
+    highest_degree: str = (parsed.get("highest_degree") or "").lower()
 
-    # Explicit freelancer signals
-    freelance_kw = ("freelance", "freelancer", "self-employed", "independent consultant",
-                    "independent contractor", "sole proprietor")
-    if any(kw in status or kw in summary for kw in freelance_kw):
-        return "Freelance"
+    # Keywords that indicate a recognised degree-level qualification
+    graduate_kw = (
+        "bachelor", "b.sc", "b.sc.", "bsc", "b.e", "b.e.", "be ",
+        "b.tech", "btech", "b.com", "bcom", "b.a", "b.a.", "ba ",
+        "b.s", "b.s.", "bs ", "llb", "mbbs", "bba", "bca",
+        "master", "m.sc", "m.sc.", "msc", "m.e", "m.e.", "me ",
+        "m.tech", "mtech", "mba", "m.com", "mcom", "m.a", "m.a.", "ma ",
+        "m.s", "m.s.", "ms ", "llm", "mca",
+        "phd", "ph.d", "ph.d.", "doctorate", "doctor of",
+        "degree", "graduate", "graduation",
+        "engineering", "technology", "science", "arts", "commerce",
+    )
 
-    # Contract signals: short tenures across many companies, or explicit keywords
-    contract_kw = ("contract", "contractor", "temporary", "temp ", "on contract",
-                   "contractual", "fixed term", "fixed-term")
-    for kw in contract_kw:
-        if kw in status or kw in summary:
-            return "Contract"
+    if highest_degree and any(kw in highest_degree for kw in graduate_kw):
+        return "Graduate"
 
-    # Check experience entries for contract-style descriptions
-    for exp in experience:
-        desc = (exp.get("description") or "").lower()
-        title = (exp.get("title") or "").lower()
-        if any(kw in desc or kw in title for kw in contract_kw):
-            return "Contract"
+    for edu in education:
+        degree = (edu.get("degree") or "").lower()
+        field = (edu.get("field_of_study") or "").lower()
+        combined = f"{degree} {field}"
+        if any(kw in combined for kw in graduate_kw):
+            return "Graduate"
 
-    # Default to Permanent for employed candidates with stable tenures
-    if experience:
-        return "Permanent"
+    # Has some education listed but no degree-level qualification found
+    if education or highest_degree:
+        return "Non Graduate"
 
     return None
 
