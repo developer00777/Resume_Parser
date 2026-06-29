@@ -15,7 +15,7 @@ from app.config import settings
 
 logger = logging.getLogger(__name__)
 
-_CHUNK_TIMEOUT = 45.0
+_CHUNK_TIMEOUT = 90.0
 
 
 class LLMClient:
@@ -91,7 +91,8 @@ class LLMClient:
                 detail=f"LLM service returned an error: {e.response.status_code}",
             )
 
-        return response.json()["choices"][0]["message"]["content"]
+        content = response.json()["choices"][0]["message"].get("content")
+        return content or ""
 
     async def complete_multimodal(self, messages: list[dict], max_tokens: int = 3000) -> str:
         """Multimodal chat-completion (vision/file content). Used by OCR only."""

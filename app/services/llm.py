@@ -338,9 +338,9 @@ Resume text (complete):
 
 # (chunk_name, prompt_template, max_tokens)
 _CHUNKS = [
-    ("chunk_a", PROMPT_CHUNK_A, 1100),
-    ("chunk_b", PROMPT_CHUNK_B, 2300),
-    ("chunk_c", PROMPT_CHUNK_C, 2800),
+    ("chunk_a", PROMPT_CHUNK_A, 1800),
+    ("chunk_b", PROMPT_CHUNK_B, 3200),
+    ("chunk_c", PROMPT_CHUNK_C, 3800),
 ]
 
 _FULL_TEXT_THRESHOLD = 8000
@@ -350,7 +350,9 @@ _FULL_TEXT_THRESHOLD = 8000
 # JSON parsing helpers (SRP: response → dict, no HTTP concerns)
 # ---------------------------------------------------------------------------
 
-def _clean_response(raw: str) -> str:
+def _clean_response(raw: str | None) -> str:
+    if not raw:
+        return ""
     cleaned = raw.strip()
     cleaned = re.sub(r"<think>.*?</think>", "", cleaned, flags=re.DOTALL).strip()
     if cleaned.startswith("```"):
