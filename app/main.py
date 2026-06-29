@@ -19,16 +19,16 @@ logger = logging.getLogger(__name__)
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
-    """Startup: validate OpenRouter key is configured. Shutdown: close HTTP client."""
+    """Startup: validate config. Shutdown: close both LLM HTTP clients."""
     if not settings.openrouter_api_key:
         logger.warning("OPENROUTER_API_KEY is not set — LLM calls will fail with 401.")
     else:
-        logger.info(f"OpenRouter configured — model: {settings.openrouter_model}")
+        logger.info(f"Extraction model : {settings.openrouter_model}")
+        logger.info(f"OCR model        : {settings.openrouter_ocr_model}")
     yield
-    # Close the reusable HTTP client on shutdown
-    from app.services.llm import _openrouter_client
-    if _openrouter_client and not _openrouter_client.is_closed:
-        await _openrouter_client.aclose()
+    from app.services.llm_client import extraction_client, ocr_client
+    await extraction_client.aclose()
+    await ocr_client.aclose()
 
 
 app = FastAPI(

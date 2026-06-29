@@ -4,7 +4,9 @@ from pydantic_settings import BaseSettings
 class Settings(BaseSettings):
     # ── OpenRouter ────────────────────────────────────────────────────────────
     openrouter_api_key: str = ""
-    openrouter_model: str = "openai/gpt-4o-mini"
+    # Text extraction (3 parallel chunks) — DeepSeek V4 Flash: fast MoE, 70% cheaper output
+    openrouter_model: str = "deepseek/deepseek-v4-flash"
+    # OCR fallback for image-based PDFs — must stay multimodal (vision-capable)
     openrouter_ocr_model: str = "openai/gpt-4o-mini"
     openrouter_base_url: str = "https://openrouter.ai/api/v1"
 

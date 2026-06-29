@@ -1,164 +1,60 @@
+"""
+Resume extraction service.
+
+Responsibilities (SRP — one per class/function group):
+  - PROMPT_CHUNK_*   : prompt templates (data, not logic)
+  - _normalise_text  : raw text cleaning
+  - _extract_json    : LLM response → validated dict
+  - _compute_score   : 7-category weighted scoring
+  - ResumeExtractor  : orchestrate parallel chunk calls → merged parsed dict
+
+HTTP transport lives in LLMClient (llm_client.py).
+OCR lives in OCRService (ocr.py).
+Neither is imported here — callers inject what they need (DIP).
+"""
 import asyncio
 import json
 import logging
 import re
 
-import httpx
-from fastapi import HTTPException
-
-from app.config import settings
+from app.services.llm_client import LLMClient, extraction_client
 
 logger = logging.getLogger(__name__)
 
-# Reusable HTTP client — avoids connection setup overhead on every call
-_openrouter_client: httpx.AsyncClient | None = None
-
-# Per-chunk timeout (seconds).
-_CHUNK_TIMEOUT = 45.0
-
-
-def _make_client() -> httpx.AsyncClient:
-    """Create a new httpx AsyncClient for OpenRouter."""
-    return httpx.AsyncClient(
-        timeout=httpx.Timeout(_CHUNK_TIMEOUT, connect=10.0),
-        base_url=settings.openrouter_base_url,
-        headers={
-            "Authorization": f"Bearer {settings.openrouter_api_key}",
-            "Content-Type": "application/json",
-            "HTTP-Referer": "https://resumeparser-production-45b1.up.railway.app",
-            "X-Title": "Resume Parser API",
-        },
-    )
-
-
-def _get_client() -> httpx.AsyncClient:
-    """
-    Return a reusable async HTTP client for OpenRouter calls.
-
-    The client is bound to the event loop that was running when it was created.
-    To survive test suites (pytest-asyncio creates a new loop per test), we tag
-    the client with the loop it was created in and recreate it whenever the
-    running loop differs.
-    """
-    global _openrouter_client
-
-    if _openrouter_client is None or _openrouter_client.is_closed:
-        _openrouter_client = _make_client()
-        try:
-            _openrouter_client._bound_loop = asyncio.get_running_loop()
-        except RuntimeError:
-            _openrouter_client._bound_loop = None
-        return _openrouter_client
-
-    try:
-        current_loop = asyncio.get_running_loop()
-        bound_loop = getattr(_openrouter_client, '_bound_loop', None)
-        if bound_loop is not None and bound_loop is not current_loop:
-            # Loop changed — recreate the client for the new loop.
-            _openrouter_client = _make_client()
-            _openrouter_client._bound_loop = current_loop
-    except RuntimeError:
-        pass  # No running loop (sync context) — keep existing client.
-
-    return _openrouter_client
-
 
 # ---------------------------------------------------------------------------
-# Text normaliser — runs BEFORE section splitting or LLM calls
-#
-# PDF extraction introduces many artefacts:
-#   • Multiple consecutive blank lines (multi-column layouts)
-#   • Mid-word hyphenation ("soft-\nware" → "software")
-#   • Windows line-endings
-#   • Non-breaking spaces / zero-width chars
-#   • Garbage Unicode from font encoding issues
-#
-# Normalise to clean, single-spaced plain text so the LLM sees consistent
-# input regardless of the original resume template or design.
+# Text normaliser
 # ---------------------------------------------------------------------------
 
 def _normalise_text(raw: str) -> str:
-    """
-    Normalise raw PDF/DOCX text into clean, LLM-friendly plain text.
-
-    Operations (in order):
-    1. CRLF → LF
-    2. Remove zero-width / non-printable chars
-    3. Replace non-breaking spaces and other Unicode spaces with regular space
-    4. Strip fullwidth/garbled chars from bad font encoding (ï¼, Â artifacts)
-    5. Re-join soft-hyphenated line breaks (word-\n → word)
-    6. Collapse "MM/YYYY\nto\nCurrent" date fragments onto one line
-    7. Strip trailing whitespace from every line
-    8. Collapse runs of 3+ blank lines to 2 blank lines
-    9. Collapse interior runs of spaces (>2) to a single space
-    """
     text = raw.replace("\r\n", "\n").replace("\r", "\n")
-
-    # Remove zero-width and other invisible Unicode control chars (keep \n \t)
-    text = re.sub(r'[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f\u200b-\u200f\ufeff]', '', text)
-
-    # Non-breaking space and related Unicode spaces → regular space
-    for ch in ('\u00a0', '\u2007', '\u202f', '\u2009', '\u2008', '\u2006',
-               '\u2005', '\u2004', '\u2003', '\u2002', '\u2001', '\u2000',
-               '\u3000', '\u1680'):
+    text = re.sub(r'[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f​-‏﻿]', '', text)
+    for ch in (' ', ' ', ' ', ' ', ' ', ' ',
+               ' ', ' ', ' ', ' ', ' ', ' ',
+               '　', ' '):
         text = text.replace(ch, ' ')
-
-    # Fullwidth chars (U+FF00–U+FFEF) that appear in bad font encodings.
-    text = re.sub(r'[\uff00-\uffef]', '', text)
-
-    # "ï¼" artifact: U+00EF + U+00BC (fraction char) is the Latin-1 mis-decode of
-    # UTF-8 sequences like EF BC xx (fullwidth separators). Remove entirely.
-    text = re.sub(r'ï[¼½¾⅓⅔⅛⅜⅝⅞][\u200b\u200c\u200d]*', '', text)
-
-    # "Â" (U+00C2) appears when UTF-8 byte 0xC2 is decoded as Latin-1.
-    # It appears as a spurious prefix character with no semantic content.
+    text = re.sub(r'[＀-￯]', '', text)
+    text = re.sub(r'ï[¼½¾⅓⅔⅛⅜⅝⅞][​‌‍]*', '', text)
     text = re.sub(r'Â\s?', ' ', text)
     text = text.replace('Â', '')
-
-    # Re-join soft-hyphenated line breaks: "soft-\nware" → "software"
     text = re.sub(r'(\w)-\n(\w)', r'\1\2', text)
-
-    # Collapse MM/YYYY\n[to]\nCurrent|Present|MM/YYYY → single-line date ranges
-    # Catches: "03/2016\n\nto\n\nCurrent" → "03/2016 to Current"
-    # And: "03/2016\nto\n04/2020" → "03/2016 to 04/2020"
     text = re.sub(
         r'(\d{1,2}/\d{4})\s*\n+\s*(to)\s*\n+\s*(\d{1,2}/\d{4}|Current|Present|Now)',
-        r'\1 \2 \3',
-        text, flags=re.IGNORECASE
+        r'\1 \2 \3', text, flags=re.IGNORECASE,
     )
-    # Also handle Month YYYY\nto\nCurrent
     text = re.sub(
         r'((?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\.?\s+\d{4})\s*\n+\s*(to)\s*\n+\s*(\d{1,2}/\d{4}|Current|Present|Now|(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\.?\s+\d{4})',
-        r'\1 \2 \3',
-        text, flags=re.IGNORECASE
+        r'\1 \2 \3', text, flags=re.IGNORECASE,
     )
-
-    # Strip trailing spaces/tabs on each line
     lines = [l.rstrip() for l in text.split('\n')]
     text = '\n'.join(lines)
-
-    # Collapse runs of 3+ blank lines → max 2 blank lines
     text = re.sub(r'\n{3,}', '\n\n', text)
-
-    # Collapse interior whitespace runs (not newlines) > 1 space → 1 space
     text = re.sub(r'[^\S\n]{2,}', ' ', text)
-
     return text.strip()
 
 
 # ---------------------------------------------------------------------------
 # Prompts
-#
-# Design rules:
-#   1. Template-independent: never assume section headers exist.
-#      The LLM receives the FULL resume text and must scan it completely.
-#   2. Strict JSON-only output — no prose, no markdown fences.
-#   3. Explicit null semantics: every field must be returned (null if absent).
-#   4. Forbid fabrication: "ONLY extract what is explicitly written".
-#   5. Enumerate common label variants so the LLM knows what to look for
-#      even if the section header is missing or uses a non-standard name.
-#   6. Handling ambiguity: when two values could match, prefer the one
-#      closest to the resume header (top of document).
 # ---------------------------------------------------------------------------
 
 PROMPT_CHUNK_A = """\
@@ -440,83 +336,42 @@ CRITICAL RULES — read before extracting:
 Resume text (complete):
 """
 
-
-# ---------------------------------------------------------------------------
-# Chunk definitions
-#
-# Each chunk receives the FULL normalised resume text.
-# Template-independent — no section splitting needed for extraction quality.
-#
 # (chunk_name, prompt_template, max_tokens)
-# ---------------------------------------------------------------------------
-CHUNKS = [
+_CHUNKS = [
     ("chunk_a", PROMPT_CHUNK_A, 1100),
     ("chunk_b", PROMPT_CHUNK_B, 2300),
     ("chunk_c", PROMPT_CHUNK_C, 2800),
 ]
 
-
-# Maximum resume length to send to each chunk without truncation.
 _FULL_TEXT_THRESHOLD = 8000
 
 
 # ---------------------------------------------------------------------------
-# OpenRouter client
+# JSON parsing helpers (SRP: response → dict, no HTTP concerns)
 # ---------------------------------------------------------------------------
 
-async def _call_openrouter(prompt: str, max_tokens: int = 200) -> str:
-    """Make a single OpenRouter chat-completion call."""
-    client = _get_client()
-    try:
-        response = await client.post(
-            "/chat/completions",
-            json={
-                "model": settings.openrouter_model,
-                "messages": [{"role": "user", "content": prompt}],
-                "max_tokens": max_tokens,
-                "temperature": 0.0,
-                "response_format": {"type": "json_object"},
-            },
-        )
-        response.raise_for_status()
-    except httpx.ConnectError:
-        logger.error("Cannot connect to OpenRouter")
-        raise HTTPException(status_code=503, detail="OpenRouter service is unavailable.")
-    except httpx.TimeoutException:
-        logger.error("OpenRouter request timed out")
-        raise HTTPException(status_code=504, detail="LLM processing timed out.")
-    except httpx.HTTPStatusError as e:
-        logger.error(f"OpenRouter returned error: {e.response.status_code} — {e.response.text[:300]}")
-        raise HTTPException(status_code=502, detail=f"LLM service returned an error: {e.response.status_code}")
-
-    data = response.json()
-    return data["choices"][0]["message"]["content"]
-
-
 def _clean_response(raw: str) -> str:
-    """Strip thinking tags, code fences, and whitespace from LLM output."""
     cleaned = raw.strip()
     cleaned = re.sub(r"<think>.*?</think>", "", cleaned, flags=re.DOTALL).strip()
     if cleaned.startswith("```"):
-        lines = cleaned.split("\n")
-        lines = [l for l in lines if not l.strip().startswith("```")]
+        lines = [l for l in cleaned.split("\n") if not l.strip().startswith("```")]
         cleaned = "\n".join(lines).strip()
     return cleaned
 
 
 def _sanitize_nulls(obj):
-    """Recursively convert string 'null' / 'N/A' / '' to actual None in parsed JSON."""
     if isinstance(obj, dict):
         return {k: _sanitize_nulls(v) for k, v in obj.items()}
     if isinstance(obj, list):
         return [_sanitize_nulls(item) for item in obj]
-    if isinstance(obj, str) and obj.strip().lower() in ("null", "none", "n/a", "na", "not available", "not applicable", ""):
+    if isinstance(obj, str) and obj.strip().lower() in (
+        "null", "none", "n/a", "na", "not available", "not applicable", ""
+    ):
         return None
     return obj
 
 
 def _extract_json(raw: str) -> dict:
-    """Extract a JSON object from raw LLM text and sanitize null strings."""
     cleaned = _clean_response(raw)
     data = None
     try:
@@ -536,95 +391,59 @@ def _extract_json(raw: str) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# Post-processing: merge professional_meta into experience data
+# Post-processing
 # ---------------------------------------------------------------------------
 
 def _merge_professional_meta(parsed: dict) -> dict:
-    """
-    Merge fields from professional_meta into experience data (and personal data).
-
-    The professional_meta prompt extracts CTC/notice/industry from anywhere in the
-    document. If the experience prompt missed these (because they were in the header
-    or personal section), we fill them in from professional_meta.
-    """
     meta = parsed.get("professional_meta", {})
-    exp  = parsed.get("experience", {})
+    exp = parsed.get("experience", {})
+    personal = parsed.get("personal", {})
 
-    # Fields to backfill into experience if missing there
-    meta_to_exp = [
-        "current_ctc", "expected_ctc", "notice_period",
-        "industry", "preferred_location",
-    ]
-    for field in meta_to_exp:
+    for field in ("current_ctc", "expected_ctc", "notice_period", "industry", "preferred_location"):
         if not exp.get(field) and meta.get(field):
             exp[field] = meta[field]
 
-    # Fields to backfill into personal if missing there
-    personal = parsed.get("personal", {})
-    meta_to_personal = [
-        "marital_status", "languages_known", "nationality",
-        "blood_group", "gender", "date_of_birth",
-    ]
-    for field in meta_to_personal:
+    for field in ("marital_status", "languages_known", "nationality", "blood_group", "gender", "date_of_birth"):
         if not personal.get(field) and meta.get(field):
             personal[field] = meta[field]
 
     parsed["experience"] = exp
-    parsed["personal"]   = personal
+    parsed["personal"] = personal
     return parsed
 
 
 # ---------------------------------------------------------------------------
-# Score computation
+# Score computation (SRP: pure scoring logic, no I/O)
 # ---------------------------------------------------------------------------
 
 def _compute_score(parsed: dict) -> dict:
-    """
-    Compute resume score using the 7-category weighted matrix.
-
-    Score matrix (each category scored 0–10, then weighted):
-    ┌─────────────────────────────┬────────┬──────────────────────────────────────────┐
-    │ Category                    │ Weight │ Evaluation Criteria                      │
-    ├─────────────────────────────┼────────┼──────────────────────────────────────────┤
-    │ Contact Information         │  5%    │ Name, email, phone, LinkedIn, portfolio  │
-    │ Professional Summary        │ 15%    │ Clear, concise, highlights strengths      │
-    │ Work Experience             │ 25%    │ Structured, achievements, measurable KPIs │
-    │ Skills                      │ 20%    │ Relevant, categorized, hard + soft skills │
-    │ Education & Certifications  │ 10%    │ Complete, formatted, relevant certs       │
-    │ Achievements / Projects     │ 15%    │ Projects, awards, quantifiable results    │
-    │ Format & Design             │ 10%    │ Clean layout, readable, no typos          │
-    └─────────────────────────────┴────────┴──────────────────────────────────────────┘
-    """
-    contact    = parsed.get("contact", {})
-    skills     = parsed.get("skills", {}).get("all_skills", []) or parsed.get("skills", {}).get("skills", [])
+    contact = parsed.get("contact", {})
+    skills = parsed.get("skills", {}).get("all_skills", []) or parsed.get("skills", {}).get("skills", [])
     experience = parsed.get("experience", {}).get("experience", [])
-    education  = parsed.get("education", {}).get("education", [])
-    certs      = parsed.get("certifications", {}).get("certifications", [])
-    projects   = parsed.get("projects", {}).get("projects", [])
-    awards     = parsed.get("awards", {}).get("awards", [])
-    summary    = parsed.get("summary", {}).get("summary", "") or ""
+    education = parsed.get("education", {}).get("education", [])
+    certs = parsed.get("certifications", {}).get("certifications", [])
+    projects = parsed.get("projects", {}).get("projects", [])
+    awards = parsed.get("awards", {}).get("awards", [])
+    summary = parsed.get("summary", {}).get("summary", "") or ""
 
     remarks = []
 
-    # ── 1. Contact Information (weight 5%) ───────────────────────────────────
-    contact_score = 0
-    has_name  = bool(contact.get("full_name") or contact.get("first_name") or contact.get("name"))
+    has_name = bool(contact.get("full_name") or contact.get("first_name") or contact.get("name"))
     has_email = bool(contact.get("email"))
     has_phone = bool(contact.get("phone") or contact.get("alternate_phone"))
-    has_loc   = bool(contact.get("current_location"))
-    has_li    = bool(contact.get("linkedin_url"))
+    has_loc = bool(contact.get("current_location"))
+    has_li = bool(contact.get("linkedin_url"))
 
-    if has_name:  contact_score += 3
-    if has_email: contact_score += 3
-    if has_phone: contact_score += 2
-    if has_loc:   contact_score += 1
-    if has_li:    contact_score += 1
-    contact_score = min(10, contact_score)
-
+    contact_score = min(10, sum([
+        3 if has_name else 0,
+        3 if has_email else 0,
+        2 if has_phone else 0,
+        1 if has_loc else 0,
+        1 if has_li else 0,
+    ]))
     if contact_score < 5:
         remarks.append("Contact information is incomplete — add name, email, and phone.")
 
-    # ── 2. Professional Summary (weight 15%) ─────────────────────────────────
     summary_score = 0
     if summary:
         words = len(summary.split())
@@ -635,28 +454,20 @@ def _compute_score(parsed: dict) -> dict:
     else:
         remarks.append("No professional summary found — add a concise 2–3 sentence summary.")
 
-    # ── 3. Work Experience (weight 25%) ──────────────────────────────────────
     exp_count = len(experience)
-    has_desc  = sum(1 for e in experience if e.get("description") and len(e["description"]) > 20)
-
+    has_desc = sum(1 for e in experience if e.get("description") and len(e["description"]) > 20)
     if exp_count == 0:
         exp_score = 0
         remarks.append("No work experience found.")
-    elif exp_count == 1:
-        exp_score = 4
-    elif exp_count == 2:
-        exp_score = 6
-    elif exp_count <= 4:
-        exp_score = 8
-    else:
-        exp_score = 9
-
+    elif exp_count == 1:   exp_score = 4
+    elif exp_count == 2:   exp_score = 6
+    elif exp_count <= 4:   exp_score = 8
+    else:                  exp_score = 9
     if exp_count > 0 and has_desc == exp_count:
         exp_score = min(10, exp_score + 1)
     if exp_count > 0 and has_desc < exp_count:
         remarks.append("Add measurable impact and descriptions to work experience entries.")
 
-    # ── 4. Skills (weight 20%) ────────────────────────────────────────────────
     skill_count = len(skills)
     if skill_count == 0:
         skills_score = 0
@@ -664,72 +475,56 @@ def _compute_score(parsed: dict) -> dict:
     elif skill_count <= 3:
         skills_score = 2
         remarks.append("Very few skills listed — aim for at least 8–10 relevant skills.")
-    elif skill_count <= 6:  skills_score = 4
-    elif skill_count <= 10: skills_score = 6
-    elif skill_count <= 15: skills_score = 8
-    elif skill_count <= 20: skills_score = 9
-    else:                   skills_score = 10
+    elif skill_count <= 6:   skills_score = 4
+    elif skill_count <= 10:  skills_score = 6
+    elif skill_count <= 15:  skills_score = 8
+    elif skill_count <= 20:  skills_score = 9
+    else:                    skills_score = 10
 
-    # ── 5. Education & Certifications (weight 10%) ───────────────────────────
     edu_score = 0
     if education:
         edu = education[0]
-        if edu.get("institution"):    edu_score += 2
-        if edu.get("degree"):         edu_score += 2
-        if edu.get("field_of_study"): edu_score += 1
-        if edu.get("end_year"):       edu_score += 1
-        if edu.get("grade"):          edu_score += 1
+        edu_score = sum([
+            2 if edu.get("institution") else 0,
+            2 if edu.get("degree") else 0,
+            1 if edu.get("field_of_study") else 0,
+            1 if edu.get("end_year") else 0,
+            1 if edu.get("grade") else 0,
+        ])
     else:
         remarks.append("No education details found.")
+    edu_score = min(10, edu_score + min(3, len(certs))) if education else 0
 
-    cert_boost = min(3, len(certs))
-    edu_score  = min(10, edu_score + cert_boost)
-    if not education:
-        edu_score = 0
-
-    # ── 6. Achievements / Projects (weight 15%) ──────────────────────────────
     achieve_score = 0
     project_count = len(projects)
-    award_count   = len(awards)
-
+    award_count = len(awards)
     if project_count == 0 and award_count == 0:
-        achieve_score = 0
         remarks.append("No projects or achievements found — add notable projects or awards.")
     else:
         if project_count >= 3:   achieve_score += 6
         elif project_count == 2: achieve_score += 4
         elif project_count == 1: achieve_score += 2
-
         proj_with_desc = sum(1 for p in projects if p.get("description") and len(p["description"]) > 10)
-        if proj_with_desc == project_count and project_count > 0:
+        if proj_with_desc == project_count > 0:
             achieve_score = min(10, achieve_score + 1)
-
         if award_count >= 2:   achieve_score = min(10, achieve_score + 3)
         elif award_count == 1: achieve_score = min(10, achieve_score + 2)
 
-    # ── 7. Format & Design (weight 10%) ──────────────────────────────────────
     populated_sections = sum([
-        has_name,
-        bool(summary),
-        bool(experience),
-        bool(skills),
-        bool(education),
-        bool(projects or awards),
-        bool(certs),
+        has_name, bool(summary), bool(experience), bool(skills),
+        bool(education), bool(projects or awards), bool(certs),
     ])
     format_score = min(10, populated_sections + 3)
 
-    # ── Weighted overall ──────────────────────────────────────────────────────
-    overall = round(
-        contact_score   * 0.05 * 10
+    overall = min(100, round(
+        contact_score * 0.05 * 10
         + summary_score * 0.15 * 10
-        + exp_score     * 0.25 * 10
-        + skills_score  * 0.20 * 10
-        + edu_score     * 0.10 * 10
+        + exp_score * 0.25 * 10
+        + skills_score * 0.20 * 10
+        + edu_score * 0.10 * 10
         + achieve_score * 0.15 * 10
-        + format_score  * 0.10 * 10
-    )
-    overall = min(100, overall)
+        + format_score * 0.10 * 10
+    ))
 
     if overall >= 90:
         grade = "Excellent"
@@ -745,183 +540,175 @@ def _compute_score(parsed: dict) -> dict:
         if not remarks: remarks.append("Resume needs a major overhaul — many critical sections are missing.")
 
     return {
-        "overall":                  overall,
-        "contact_information":      contact_score,
-        "professional_summary":     summary_score,
-        "work_experience":          exp_score,
-        "skills":                   skills_score,
+        "overall": overall,
+        "contact_information": contact_score,
+        "professional_summary": summary_score,
+        "work_experience": exp_score,
+        "skills": skills_score,
         "education_certifications": edu_score,
-        "achievements_projects":    achieve_score,
-        "format_design":            format_score,
-        "grade":                    grade,
-        "remarks":                  " ".join(remarks),
+        "achievements_projects": achieve_score,
+        "format_design": format_score,
+        "grade": grade,
+        "remarks": " ".join(remarks),
     }
 
 
 # ---------------------------------------------------------------------------
-# Parallel parsing
+# ResumeExtractor — orchestration only (SRP + DIP)
 # ---------------------------------------------------------------------------
 
-async def _call_chunk(chunk_name: str, prompt: str, max_tok: int, chunk_text: str) -> tuple[str, dict]:
-    """Call OpenRouter for a single chunk and return (name, extracted_data)."""
-    try:
-        logger.info(f"Chunk '{chunk_name}': sending {len(chunk_text)} chars, max_tok={max_tok}")
-        raw = await _call_openrouter(prompt + chunk_text, max_tokens=max_tok)
-        data = _extract_json(raw)
-        logger.info(f"Chunk '{chunk_name}' extracted {len(data)} fields")
-        return chunk_name, data
-    except Exception as e:
-        logger.error(f"Chunk '{chunk_name}' failed: {e}")
-        return chunk_name, {}
+class ResumeExtractor:
+    """
+    Orchestrates 3 parallel LLM chunk calls and merges their results.
+
+    Open/Closed: inject a different LLMClient to swap models without touching this class.
+    Dependency Inversion: depends on LLMClient abstraction, not on HTTP specifics.
+    """
+
+    def __init__(self, client: LLMClient) -> None:
+        self._client = client
+
+    async def _call_chunk(self, chunk_name: str, prompt: str, max_tok: int, text: str) -> tuple[str, dict]:
+        try:
+            logger.info(f"Chunk '{chunk_name}': {len(text)} chars, max_tok={max_tok}, model={self._client.model}")
+            raw = await self._client.complete(
+                prompt + text,
+                max_tokens=max_tok,
+                response_format={"type": "json_object"},
+            )
+            data = _extract_json(raw)
+            logger.info(f"Chunk '{chunk_name}' extracted {len(data)} fields")
+            return chunk_name, data
+        except Exception as e:
+            logger.error(f"Chunk '{chunk_name}' failed: {e}")
+            return chunk_name, {}
+
+    async def extract(self, text: str) -> dict:
+        text = _normalise_text(text)
+        chunk_text = text[:_FULL_TEXT_THRESHOLD]
+
+        coroutines = [
+            self._call_chunk(name, prompt, max_tok, chunk_text)
+            for name, prompt, max_tok in _CHUNKS
+        ]
+
+        try:
+            results = await asyncio.wait_for(
+                asyncio.gather(*coroutines),
+                timeout=120.0,
+            )
+        except asyncio.TimeoutError:
+            from fastapi import HTTPException
+            logger.error("ResumeExtractor: overall 120-second timeout exceeded")
+            raise HTTPException(status_code=504, detail="Resume parsing timed out. Try a smaller file.")
+
+        parsed: dict = {}
+        for chunk_name, data in results:
+            if chunk_name == "chunk_a":
+                parsed["contact"] = data.get("contact", {})
+                parsed["personal"] = data.get("personal", {})
+                parsed["professional_meta"] = data.get("professional_meta", {})
+            elif chunk_name == "chunk_b":
+                parsed["skills"] = data.get("skills", {})
+                parsed["certifications"] = {"certifications": data.get("certifications", [])}
+                parsed["awards"] = {"awards": data.get("awards", [])}
+                parsed["summary"] = {"summary": data.get("summary")}
+                parsed["projects"] = {"projects": data.get("projects", [])}
+            elif chunk_name == "chunk_c":
+                parsed["experience"] = data.get("experience", {})
+                parsed["education"] = data.get("education", {})
+
+        parsed = _merge_professional_meta(parsed)
+        score = _compute_score(parsed)
+
+        contact = parsed.get("contact", {})
+        personal = parsed.get("personal", {})
+        skills_data = parsed.get("skills", {})
+        exp_data = parsed.get("experience", {})
+        edu_data = parsed.get("education", {})
+        cert_data = parsed.get("certifications", {})
+        proj_data = parsed.get("projects", {})
+        award_data = parsed.get("awards", {})
+        summary_data = parsed.get("summary", {})
+
+        languages_raw = personal.get("languages_known")
+        if isinstance(languages_raw, list):
+            spoken_languages = [l.strip() for l in languages_raw if l.strip()]
+        elif isinstance(languages_raw, str) and languages_raw:
+            spoken_languages = [
+                p.strip()
+                for p in re.split(r'[,;/]|\band\b', languages_raw, flags=re.IGNORECASE)
+                if p.strip()
+            ]
+        else:
+            spoken_languages = []
+
+        return {
+            "first_name": contact.get("first_name"),
+            "last_name": contact.get("last_name"),
+            "name": contact.get("full_name"),
+            "full_name": contact.get("full_name"),
+            "email": contact.get("email"),
+            "alternate_email": contact.get("alternate_email"),
+            "phone": contact.get("phone"),
+            "number": contact.get("alternate_phone"),
+            "current_location": contact.get("current_location"),
+            "linkedin_url": contact.get("linkedin_url"),
+            "web_address": contact.get("web_address"),
+            "date_of_birth": personal.get("date_of_birth"),
+            "gender": personal.get("gender"),
+            "nationality": personal.get("nationality"),
+            "father_name": personal.get("father_name"),
+            "mother_name": personal.get("mother_name"),
+            "aadhar_number": personal.get("aadhar_number"),
+            "pan_number": personal.get("pan_number"),
+            "passport_number": personal.get("passport_number"),
+            "blood_group": personal.get("blood_group"),
+            "languages_known": languages_raw if isinstance(languages_raw, str) else ", ".join(spoken_languages),
+            "spoken_languages": spoken_languages,
+            "marital_status": personal.get("marital_status"),
+            "skills": skills_data.get("all_skills", []),
+            "primary_skills": skills_data.get("primary_skills", []),
+            "technical_skills": skills_data.get("technical_skills", []),
+            "general_skills": skills_data.get("general_skills", []),
+            "experience": exp_data.get("experience", []),
+            "total_years_of_experience": exp_data.get("total_years_of_experience"),
+            "years_of_experience": exp_data.get("total_years_of_experience"),
+            "number_of_companies": exp_data.get("number_of_companies"),
+            "current_company": exp_data.get("current_company"),
+            "current_designation": exp_data.get("current_designation"),
+            "current_ctc": exp_data.get("current_ctc"),
+            "expected_ctc": exp_data.get("expected_ctc"),
+            "notice_period": exp_data.get("notice_period"),
+            "current_employment_status": exp_data.get("current_employment_status"),
+            "industry": exp_data.get("industry"),
+            "preferred_location": exp_data.get("preferred_location"),
+            "education": edu_data.get("education", []),
+            "highest_degree": edu_data.get("highest_degree"),
+            "qualification_1": edu_data.get("qualification_1"),
+            "qualification_1_type": edu_data.get("qualification_1_type"),
+            "institute_1": edu_data.get("institute_1"),
+            "qualification_2": edu_data.get("qualification_2"),
+            "qualification_2_type": edu_data.get("qualification_2_type"),
+            "institute_2": edu_data.get("institute_2"),
+            "education_detail": edu_data.get("education_detail"),
+            "projects": proj_data.get("projects", []),
+            "certifications": cert_data.get("certifications", []),
+            "awards": award_data.get("awards", []),
+            "summary": summary_data.get("summary"),
+            "resume_score": score,
+        }
+
+
+# ── Module-level singleton (DIP: inject extraction_client) ────────────────────
+_extractor = ResumeExtractor(client=extraction_client)
 
 
 async def parse_resume(text: str) -> dict:
-    """
-    Parse resume using 3 parallel LLM calls via OpenRouter.
-
-    Architecture:
-    1. Normalise raw text (remove encoding artefacts, collapse whitespace).
-    2. Send full text (up to _FULL_TEXT_THRESHOLD) to all 3 chunks in parallel.
-       - Chunk A: contact + personal + professional_meta (950 tokens)
-       - Chunk B: skills + certifications + awards + summary + projects (2100 tokens)
-       - Chunk C: experience + education (2600 tokens)
-    3. Merge professional_meta into experience/personal to fill any gaps.
-    4. Compute the 7-category score matrix.
-    """
-    text = _normalise_text(text)
-    chunk_text = text[:_FULL_TEXT_THRESHOLD]
-
-    coroutines = [
-        _call_chunk(name, prompt, max_tok, chunk_text)
-        for name, prompt, max_tok in CHUNKS
-    ]
-
-    try:
-        results = await asyncio.wait_for(
-            asyncio.gather(*coroutines),
-            timeout=120.0,
-        )
-    except asyncio.TimeoutError:
-        logger.error("parse_resume: overall 120-second timeout exceeded")
-        raise HTTPException(status_code=504, detail="Resume parsing timed out. Try a smaller file.")
-
-    # Unpack 3-chunk results into per-section dicts
-    parsed: dict = {}
-    for chunk_name, data in results:
-        if chunk_name == "chunk_a":
-            parsed["contact"]           = data.get("contact", {})
-            parsed["personal"]          = data.get("personal", {})
-            parsed["professional_meta"] = data.get("professional_meta", {})
-        elif chunk_name == "chunk_b":
-            parsed["skills"]        = data.get("skills", {})
-            parsed["certifications"] = {"certifications": data.get("certifications", [])}
-            parsed["awards"]        = {"awards": data.get("awards", [])}
-            parsed["summary"]       = {"summary": data.get("summary")}
-            parsed["projects"]      = {"projects": data.get("projects", [])}
-        elif chunk_name == "chunk_c":
-            parsed["experience"] = data.get("experience", {})
-            parsed["education"]  = data.get("education", {})
-
-    parsed = _merge_professional_meta(parsed)
-
-    score = _compute_score(parsed)
-
-    contact       = parsed.get("contact", {})
-    personal      = parsed.get("personal", {})
-    skills_data   = parsed.get("skills", {})
-    exp_data      = parsed.get("experience", {})
-    edu_data      = parsed.get("education", {})
-    cert_data     = parsed.get("certifications", {})
-    proj_data     = parsed.get("projects", {})
-    award_data    = parsed.get("awards", {})
-    summary_data  = parsed.get("summary", {})
-
-    # Build spoken_languages as a list (split the comma string the LLM returns)
-    languages_raw = personal.get("languages_known")
-    if isinstance(languages_raw, list):
-        spoken_languages = [l.strip() for l in languages_raw if l.strip()]
-    elif isinstance(languages_raw, str) and languages_raw:
-        import re as _re
-        spoken_languages = [
-            p.strip() for p in _re.split(r'[,;/]|\band\b', languages_raw, flags=_re.IGNORECASE)
-            if p.strip()
-        ]
-    else:
-        spoken_languages = []
-
-    return {
-        # Contact
-        "first_name":         contact.get("first_name"),
-        "last_name":          contact.get("last_name"),
-        "name":               contact.get("full_name"),
-        "full_name":          contact.get("full_name"),
-        "email":              contact.get("email"),
-        "alternate_email":    contact.get("alternate_email"),
-        "phone":              contact.get("phone"),
-        "number":             contact.get("alternate_phone"),
-        "current_location":   contact.get("current_location"),
-        "linkedin_url":       contact.get("linkedin_url"),
-        "web_address":        contact.get("web_address"),
-
-        # Personal
-        "date_of_birth":      personal.get("date_of_birth"),
-        "gender":             personal.get("gender"),
-        "nationality":        personal.get("nationality"),
-        "father_name":        personal.get("father_name"),
-        "mother_name":        personal.get("mother_name"),
-        "aadhar_number":      personal.get("aadhar_number"),
-        "pan_number":         personal.get("pan_number"),
-        "passport_number":    personal.get("passport_number"),
-        "blood_group":        personal.get("blood_group"),
-        "languages_known":    languages_raw if isinstance(languages_raw, str) else ", ".join(spoken_languages),
-        "spoken_languages":   spoken_languages,
-        "marital_status":     personal.get("marital_status"),
-
-        # Skills (categorized)
-        "skills":             skills_data.get("all_skills", []),
-        "primary_skills":     skills_data.get("primary_skills", []),
-        "technical_skills":   skills_data.get("technical_skills", []),
-        "general_skills":     skills_data.get("general_skills", []),
-
-        # Experience + professional details
-        "experience":                exp_data.get("experience", []),
-        "total_years_of_experience": exp_data.get("total_years_of_experience"),
-        "years_of_experience":       exp_data.get("total_years_of_experience"),
-        "number_of_companies":       exp_data.get("number_of_companies"),
-        "current_company":           exp_data.get("current_company"),
-        "current_designation":       exp_data.get("current_designation"),
-        "current_ctc":               exp_data.get("current_ctc"),
-        "expected_ctc":              exp_data.get("expected_ctc"),
-        "notice_period":             exp_data.get("notice_period"),
-        "current_employment_status": exp_data.get("current_employment_status"),
-        "industry":                  exp_data.get("industry"),
-        "preferred_location":        exp_data.get("preferred_location"),
-
-        # Education
-        "education":          edu_data.get("education", []),
-        "highest_degree":     edu_data.get("highest_degree"),
-        "qualification_1":    edu_data.get("qualification_1"),
-        "qualification_1_type": edu_data.get("qualification_1_type"),
-        "institute_1":        edu_data.get("institute_1"),
-        "qualification_2":    edu_data.get("qualification_2"),
-        "qualification_2_type": edu_data.get("qualification_2_type"),
-        "institute_2":        edu_data.get("institute_2"),
-        "education_detail":   edu_data.get("education_detail"),
-
-        # Other
-        "projects":           proj_data.get("projects", []),
-        "certifications":     cert_data.get("certifications", []),
-        "awards":             award_data.get("awards", []),
-        "summary":            summary_data.get("summary"),
-        "resume_score":       score,
-    }
+    """Public API — backward-compatible entry point used by routes."""
+    return await _extractor.extract(text)
 
 
 async def check_openrouter() -> bool:
-    """Check if OpenRouter is reachable and the API key is valid."""
-    client = _get_client()
-    try:
-        resp = await client.get("/models")
-        return resp.status_code == 200
-    except Exception:
-        return False
+    """Health check — pings OpenRouter with the extraction client."""
+    return await extraction_client.ping()

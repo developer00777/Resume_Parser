@@ -68,6 +68,14 @@ class ClientResumeData(BaseModel):
     Type_1__c: str | None = None                     # Graduate | Non Graduate
     Spoken_Language__c: List[str] = Field(default_factory=list)  # multi-select array
 
+    # Education Background
+    Graduation_Year2__c: str | None = None           # Text(15) — graduation year
+    Institution_College__c: str | None = None        # Text(225) — institution/college name
+
+    # Professional Degree
+    Name__c: str | None = None                       # Text(255) — professional/highest degree name
+    Year__c: str | None = None                       # Date (YYYY-MM-DD) — degree completion year
+
 
 class ClientParseResponse(BaseModel):
     success: bool
@@ -443,6 +451,37 @@ def _languages_to_list(languages_known: str | None) -> list[str]:
     return result
 
 
+def _education_graduation_year(parsed: dict) -> str | None:
+    """Return the graduation/end year from the first education entry as a string."""
+    education: list = parsed.get("education", [])
+    if not education:
+        return None
+    edu_first = education[0] if isinstance(education, list) else {}
+    year = edu_first.get("end_year")
+    return str(year) if year else None
+
+
+def _education_institution(parsed: dict) -> str | None:
+    """Return the institution name from the first education entry."""
+    education: list = parsed.get("education", [])
+    if not education:
+        return None
+    edu_first = education[0] if isinstance(education, list) else {}
+    return edu_first.get("institution")
+
+
+def _professional_degree_year(parsed: dict) -> str | None:
+    """Return the degree completion year as YYYY-MM-DD (Date type) from the first education entry."""
+    education: list = parsed.get("education", [])
+    if not education:
+        return None
+    edu_first = education[0] if isinstance(education, list) else {}
+    year = edu_first.get("end_year")
+    if year:
+        return f"{year}-01-01"
+    return None
+
+
 def map_to_client(parsed: dict) -> ClientResumeData:
     """Map the internal parsed dict to the client-1 field schema."""
     return ClientResumeData(
@@ -460,6 +499,12 @@ def map_to_client(parsed: dict) -> ClientResumeData:
         Consultant__c=None,
         Type_1__c=_infer_candidate_type(parsed),
         Spoken_Language__c=_languages_to_list(parsed.get("languages_known")),
+        # Education Background
+        Graduation_Year2__c=_education_graduation_year(parsed),
+        Institution_College__c=_education_institution(parsed),
+        # Professional Degree
+        Name__c=parsed.get("highest_degree"),
+        Year__c=_professional_degree_year(parsed),
     )
 
 
