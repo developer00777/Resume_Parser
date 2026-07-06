@@ -25,6 +25,7 @@ from app.schemas.response import (
     ModelInfo,
     map_to_salesforce,
     map_to_client,
+    _country_from_phone,
 )
 
 logger = logging.getLogger(__name__)
@@ -53,6 +54,7 @@ def _to_resume_data(parsed: dict, resume_text: str | None = None) -> ResumeData:
         phone=parsed.get("phone"),
         number=parsed.get("number"),
         current_location=parsed.get("current_location"),
+        country=_country_from_phone(parsed.get("phone") or parsed.get("number")),
         linkedin_url=parsed.get("linkedin_url"),
         web_address=parsed.get("web_address"),
         date_of_birth=parsed.get("date_of_birth"),

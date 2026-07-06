@@ -554,6 +554,35 @@ class TestSalesforceMapping:
         assert sf.SkillList is None
         assert sf.AutoPopulate_Skillset is None
 
+    def test_map_to_salesforce_derives_country_from_phone(self):
+        from app.schemas.response import map_to_salesforce
+
+        sf = map_to_salesforce(MOCK_PARSED_RESULT)
+        assert sf.Country == "India"
+
+
+class TestCountryFromPhone:
+    def test_country_from_phone_various_codes(self):
+        from app.schemas.response import _country_from_phone
+
+        assert _country_from_phone("+911234567890") == "India"
+        assert _country_from_phone("+1 (555) 123-4567") == "United States"
+        assert _country_from_phone("+44 20 7946 0958") == "United Kingdom"
+        assert _country_from_phone("+1242 555 1234") == "Bahamas"  # longest-prefix match wins over +1
+
+    def test_country_from_phone_no_country_code_returns_none(self):
+        from app.schemas.response import _country_from_phone
+
+        assert _country_from_phone("9876543210") is None
+        assert _country_from_phone(None) is None
+        assert _country_from_phone("") is None
+
+    def test_map_to_client_derives_country_from_phone(self):
+        from app.schemas.response import map_to_client
+
+        client_data = map_to_client(MOCK_PARSED_RESULT)
+        assert client_data.Country__c == "India"
+
 
 # ---------------------------------------------------------------------------
 # Score computation unit tests
