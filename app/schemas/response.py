@@ -68,6 +68,8 @@ class ClientResumeData(BaseModel):
     Consultant__c: None = None                       # always null — assigned in SF
     Type_1__c: str | None = None                     # Graduate | Non Graduate
     Spoken_Language__c: List[str] = Field(default_factory=list)  # multi-select array
+    MaritalStatus__c: str | None = None               # picklist
+    Gender__c: str | None = None                      # picklist
 
     # Education Background
     Graduation_Year2__c: str | None = None           # Text(15) — graduation year
@@ -584,6 +586,8 @@ def map_to_client(parsed: dict) -> ClientResumeData:
         Consultant__c=None,
         Type_1__c=_infer_candidate_type(parsed),
         Spoken_Language__c=_languages_to_list(parsed.get("languages_known")),
+        MaritalStatus__c=parsed.get("marital_status"),
+        Gender__c=parsed.get("gender"),
         # Education Background
         Graduation_Year2__c=_education_graduation_year(parsed),
         Institution_College__c=_education_institution(parsed),
