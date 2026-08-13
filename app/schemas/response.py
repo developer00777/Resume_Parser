@@ -388,6 +388,13 @@ def _extract_state(location: str | None) -> str | None:
     return parts[1] if len(parts) > 1 else None
 
 
+def _as_int(value: object) -> int | None:
+    """Coerce a count to int, or None. Guards the same crash as to_number()."""
+    from app.services.salesforce_coerce import to_number
+    number = to_number(value)
+    return int(number) if number is not None else None
+
+
 def _parse_duration_years(duration_str: str | None) -> float | None:
     """Extract numeric duration from strings like '2.5 years', '3 yrs'."""
     if not duration_str:
@@ -409,7 +416,14 @@ def map_to_salesforce(parsed: dict, raw_text: str | None = None) -> SalesforceRe
     """
     from datetime import date
 
-    from app.services.salesforce_coerce import iso_date, money_or_text, pick, truncate
+    from app.services.salesforce_coerce import (
+        email_or_none,
+        iso_date,
+        money_or_text,
+        pick,
+        to_number,
+        truncate,
+    )
 
     skills: list[str] = parsed.get("skills", [])
     primary_skills: list[str] = parsed.get("primary_skills", [])
@@ -485,10 +499,12 @@ def map_to_salesforce(parsed: dict, raw_text: str | None = None) -> SalesforceRe
         FirstName=parsed.get("first_name"),
         LastName=parsed.get("last_name"),
         Name=parsed.get("name"),
-        Email=parsed.get("email"),
+        # Salesforce Email fields validate format server-side; a malformed
+        # address fails the whole record.
+        Email=email_or_none(parsed.get("email")),
         Title=current_exp.get("title"),
         AadharNumber=parsed.get("aadhar_number"),
-        AlternateEmail=parsed.get("alternate_email"),
+        AlternateEmail=email_or_none(parsed.get("alternate_email")),
         AlternatePhoneNumber=parsed.get("number"),
         Phone=parsed.get("phone"),
         PhoneNumber=parsed.get("phone"),
@@ -521,8 +537,11 @@ def map_to_salesforce(parsed: dict, raw_text: str | None = None) -> SalesforceRe
         Designation=current_exp.get("title"),
         Company=parsed.get("current_company") or current_exp.get("company"),
         Department=current_exp.get("department"),
-        Years_of_Experience=parsed.get("total_years_of_experience"),
-        No_of_companies_worked_in=parsed.get("number_of_companies"),
+        # The LLM emits whatever the resume said — "5 years", "5+". Both are
+        # strings, and a string reaching a float field raises a pydantic
+        # ValidationError that fails the entire parse with a 500.
+        Years_of_Experience=to_number(parsed.get("total_years_of_experience")),
+        No_of_companies_worked_in=_as_int(parsed.get("number_of_companies")),
         # Restricted picklists in most orgs — free-text LLM output would fail
         # the record with INVALID_OR_NULL_FOR_RESTRICTED_PICKLIST.
         Current_Employment=pick(parsed.get("current_employment_status"), "Current_Employment"),

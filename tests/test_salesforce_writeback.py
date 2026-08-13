@@ -267,3 +267,92 @@ class TestExtractionStatus:
                                   failed_chunks=["chunk_c"],
                                   failed_sections=["education", "experience"])
         assert status.complete is False and "experience" in status.failed_sections
+
+
+class TestRecruitChampSandboxFields:
+    """
+    Pinned against the field list the Salesforce developer supplied for the
+    recruitchamp demo sandbox.
+
+    Every field there is org-local or standard — **none are namespaced**. That
+    makes this the case the resolver's fallback chain exists for, and worth a
+    regression test rather than a one-off check.
+    """
+
+    ORG = {
+        "name": "Candidate__c",
+        "fields": [
+            _field("Years_of_Experience__c", sf_type="double", length=None),
+            _field("AlternateEmail__c", sf_type="email", length=80),
+            _field("Email", sf_type="email", length=80),
+            _field("Current_Location__c", sf_type="string", length=255),
+            _field("CurrentDesignation__c", sf_type="string", length=255),
+            _field("CurrentCompany__c", sf_type="string", length=255),
+            _field("PhoneNumber__c", sf_type="phone", length=40),
+            _field("LastName", sf_type="string", length=80),
+            _field("Name", sf_type="string", length=121),
+            _field("FirstName", sf_type="string", length=40),
+        ],
+    }
+    LOGICAL = ["Years_of_Experience", "AlternateEmail", "Email", "Current_Location",
+               "CurrentDesignation", "CurrentCompany", "PhoneNumber",
+               "LastName", "Name", "FirstName"]
+
+    def test_every_supplied_field_resolves(self):
+        report = sc.load_specs_from_describe(self.ORG, self.LOGICAL)
+        assert report.unresolved == [], (
+            f"the resolver missed fields the org actually has: {report.unresolved}")
+        assert report.resolved["Years_of_Experience"] == "Years_of_Experience__c"
+        assert report.resolved["Email"] == "Email"          # standard field
+        assert report.resolved["PhoneNumber"] == "PhoneNumber__c"
+
+    def test_number_and_email_types_are_recognised(self):
+        sc.load_specs_from_describe(self.ORG, self.LOGICAL)
+        assert sc.spec_for("Years_of_Experience").kind == "number"
+        assert sc.spec_for("Email").kind == "email"
+        assert sc.spec_for("PhoneNumber").kind == "phone"
+        assert sc.spec_for("FirstName").length == 40
+
+    def test_only_the_orgs_own_fields_are_written(self):
+        # The payload carries ~90 fields; this org has 10. The rest must be
+        # withheld, not guessed at.
+        sc.load_specs_from_describe(self.ORG, sc.__dict__ and self.LOGICAL)
+        written, skipped = _writable_payload(
+            SalesforceResumeData(
+                Email="asha@example.com", FirstName="Asha", PhoneNumber="+911234567890",
+                PAN_Number="ABCDE1234F",   # not a field in this org
+                Blood_Group="O+",          # not a field in this org
+            ),
+            set(),
+        )
+        assert set(written) == {"Email", "FirstName", "PhoneNumber__c"}
+        assert skipped["PAN_Number"] == "no updateable field of this name in the org"
+        assert skipped["Blood_Group"] == "no updateable field of this name in the org"
+
+
+class TestValueCoercionAgainstRealTypes:
+    """The two crashes the sandbox field list exposed."""
+
+    def test_free_text_experience_does_not_kill_the_parse(self):
+        # Years_of_Experience__c is a Number. The LLM emits "5 years", and a
+        # string reaching a float field raises a pydantic ValidationError that
+        # fails the whole request with a 500.
+        from app.schemas.response import map_to_salesforce
+        base = {"skills": [], "experience": [], "education": [], "projects": [],
+                "certifications": [], "awards": [], "resume_score": {"overall": 0}}
+        for raw, expected in [("5 years", 5.0), ("5+", 5.0), ("5.5", 5.5), (None, None)]:
+            sf = map_to_salesforce({**base, "total_years_of_experience": raw})
+            assert sf.Years_of_Experience == expected, f"{raw!r} should coerce to {expected}"
+
+    def test_malformed_email_is_nulled_not_sent(self):
+        # Email__c is an Email field; Salesforce rejects a bad address with
+        # INVALID_EMAIL_ADDRESS and loses every other field on the record.
+        from app.schemas.response import map_to_salesforce
+        base = {"skills": [], "experience": [], "education": [], "projects": [],
+                "certifications": [], "awards": [], "resume_score": {"overall": 0}}
+        assert map_to_salesforce({**base, "email": "asha@example.com"}).Email == "asha@example.com"
+        assert map_to_salesforce({**base, "email": "N/A"}).Email is None
+        assert map_to_salesforce({**base, "email": "not an email"}).Email is None
+        # Resumes routinely list two addresses on one line.
+        assert map_to_salesforce(
+            {**base, "email": "asha@example.com, alt@x.com"}).Email == "asha@example.com"

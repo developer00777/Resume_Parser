@@ -67,7 +67,40 @@ _KIND_BY_SF_TYPE = {
     "int": "number", "long": "number",
     "picklist": "picklist", "multipicklist": "picklist",
     "boolean": "boolean",
+    # Salesforce validates the format of these server-side and rejects the whole
+    # record when it does not match — so they need coercing, not just clipping.
+    "email": "email", "phone": "phone", "url": "url",
+    "string": "text", "textarea": "text",
 }
+
+
+# Deliberately permissive: this exists to catch extraction noise ("email: N/A",
+# a name that landed in the email field, a trailing comma), not to adjudicate
+# RFC 5322. Salesforce's own check is roughly this strict.
+_EMAIL_RE = re.compile(r"^[^@\s,;]+@[^@\s,;]+\.[A-Za-z]{2,}$")
+
+
+def email_or_none(value: object) -> str | None:
+    """
+    Return the value only if Salesforce would accept it as an Email.
+
+    An Email field rejects a malformed address with INVALID_EMAIL_ADDRESS and
+    takes the entire record with it, so one bad extraction would lose every
+    other field on the candidate.
+    """
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+
+    # Resumes often list two addresses in one line.
+    first = re.split(r"[,;\s]+", text)[0].strip().strip(".<>()")
+    if _EMAIL_RE.match(first):
+        return first
+
+    logger.info("email_or_none: %r is not a usable address — storing null", text[:40])
+    return None
 
 
 @dataclass
