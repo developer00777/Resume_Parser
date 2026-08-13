@@ -237,3 +237,24 @@ class TestParseResumeSurfacesStatus:
             parsed = await llm.parse_resume("word " * 4000)
 
         assert parsed["extraction"]["text_truncated"] is True
+
+
+class TestClientAttribution:
+    """
+    The OpenRouter attribution header used to be a hardcoded Railway hostname,
+    so it kept pointing at the old deployment after any move. It now follows the
+    configured public URL.
+    """
+
+    def test_referer_follows_the_configured_host(self, monkeypatch):
+        monkeypatch.setattr(llm.settings, "public_base_url", "https://parser.example.com")
+        client = llm._make_client()
+        try:
+            assert client.headers["HTTP-Referer"] == "https://parser.example.com"
+        finally:
+            pass
+
+    def test_no_hardcoded_hostname_remains(self):
+        import inspect
+        source = inspect.getsource(llm._make_client)
+        assert "railway.app" not in source, "the attribution header must not be pinned to a host"

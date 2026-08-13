@@ -3,9 +3,19 @@
 How the resume parser gets wired into the Salesforce org, and how a recruiter
 ends up with a button that fills in a Candidate record.
 
-**Audience:** whoever holds System Administrator on the org, plus whoever
-deploys the parser service. Steps 1–3 and 7–9 are Salesforce-side. Steps 4–6 are
-parser-side.
+## Who does what
+
+This splits into two audiences, and conflating them is the usual source of
+confusion:
+
+| | Who | When |
+|---|---|---|
+| **Setup** (steps 1–9) | A **System Administrator**. A standard sales or recruiter profile has no Setup access and cannot do any of it. | Once |
+| **Use** | Any **recruiter** with the button on their page layout. They never see Setup. | Daily |
+
+Step 4 is not Salesforce at all — it belongs to whoever owns the parser
+deployment. Step 7 needs either the Salesforce CLI or the no-CLI workaround
+described there.
 
 ---
 
@@ -150,7 +160,34 @@ authentication error even though the Named Credential looks correctly configured
 
 ## 4. Configure the parser service
 
-Set these on the parser's host (Railway → Variables, or `.env`):
+The parser is a stateless Docker container — no database, no volumes. It runs on
+anything that runs containers. Ready-made configurations are in `deploy/`:
+
+| Target | File | Use when |
+|---|---|---|
+| DigitalOcean App Platform | `deploy/digitalocean-app.yaml` | Default choice. TLS and certificate renewal handled for you. |
+| DigitalOcean Droplet | `deploy/docker-compose.prod.yml` + `deploy/Caddyfile` | You need a **static outbound IP** (see below). Caddy handles Let's Encrypt. |
+| Railway | existing | Current deployment. |
+
+**Two hosting requirements Salesforce imposes:**
+
+1. **A certificate from a trusted CA.** Salesforce refuses callouts to
+   self-signed certs. Both configurations above handle this automatically.
+2. **A stable public hostname**, because the Named Credential points at a URL.
+
+**The static-IP question decides App Platform vs Droplet.** The parser calls
+*into* Salesforce. If the integration user's profile has **Login IP Ranges**
+set, those calls must originate from a known address — and App Platform has no
+stable egress IP, so whitelisting is impossible there. Either tick **Relax IP
+restrictions** in the Connected App's OAuth policies (step 2), or use a Droplet,
+which has a fixed IP you can whitelist.
+
+No inbound firewall rule is needed: Salesforce initiates every call.
+
+### Environment variables
+
+Set these on the parser's host (App Platform → Settings → Environment, Railway →
+Variables, or `.env` on a Droplet):
 
 | Variable | Value |
 |---|---|
@@ -161,6 +198,7 @@ Set these on the parser's host (Railway → Variables, or `.env`):
 | `SF_LOGIN_URL` | `https://test.salesforce.com` for a sandbox, `https://login.salesforce.com` for production |
 | `SF_API_VERSION` | `59.0` or later |
 | `SF_DESCRIBE_TTL_MINUTES` | `60` |
+| `PUBLIC_BASE_URL` | The parser's own public URL, e.g. `https://parser.example.com` |
 
 Leave `SF_USERNAME` / `SF_PASSWORD` **empty** — setting them switches the
 service to the password grant, which step 2 deliberately avoided.
@@ -225,6 +263,28 @@ sf project deploy start -d salesforce/force-app -o <org-alias>
 
 Deploy to a **sandbox first**. Production deployment requires 75% Apex test
 coverage org-wide.
+
+### If nobody can run the CLI
+
+**In a sandbox**, the two Apex classes and their tests can be pasted in by hand:
+**Setup → Developer Console → File → New → Apex Class**, once per class.
+
+**In production this does not work** — production orgs do not allow creating
+Apex directly, so it must arrive by Change Set from a sandbox, or by CLI.
+
+**The Lightning web component cannot be created through any Salesforce UI.** If
+the CLI is unavailable, skip the LWC and build the button as a Flow instead,
+which is entirely point-and-click and uses the same `@InvocableMethod`:
+
+> **Setup → Flows → New Flow → Screen Flow**
+> Add a Text variable `recordId`, **Available for input** ✓
+> Add a Screen ("Parse this candidate's resume?")
+> **Add Element → Action →** search **Parse Resume**, set `recordId` = `{!recordId}`
+> Save and Activate
+>
+> Then **Object Manager → Candidate → Buttons, Links and Actions → New Action**,
+> Action Type **Flow**, select the flow, Label `Parse Resume`. Add it to the
+> layout exactly as in step 8.
 
 What gets deployed:
 

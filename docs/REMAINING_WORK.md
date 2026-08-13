@@ -98,10 +98,10 @@ clear or ignore the existing 40.
 
 `ci.yml` also still sets `OLLAMA_*` environment variables, which nothing reads.
 
-### 10. `docker-compose.yml` cannot reach Salesforce
+### 10. ~~`docker-compose.yml` cannot reach Salesforce~~ — fixed
 
-It passes no `SF_*` variables through, so every Salesforce endpoint returns 503
-under Compose. Railway deployment is unaffected.
+`SF_*` variables are now passed through, and `deploy/docker-compose.prod.yml`
+adds a Caddy-fronted production stack with automatic TLS.
 
 ### 11. Production image ships the test suite
 

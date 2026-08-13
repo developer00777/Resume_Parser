@@ -26,7 +26,7 @@ def _make_client() -> httpx.AsyncClient:
         headers={
             "Authorization": f"Bearer {settings.openrouter_api_key}",
             "Content-Type": "application/json",
-            "HTTP-Referer": "https://resumeparser-production-45b1.up.railway.app",
+            "HTTP-Referer": settings.public_base_url,
             "X-Title": "Resume Parser API",
         },
     )

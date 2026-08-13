@@ -10,6 +10,10 @@ class Settings(BaseSettings):
 
     # ── Application ───────────────────────────────────────────────────────────
     api_key: str = "changeme"
+    # Public URL this service is reached at. Sent to OpenRouter as the
+    # HTTP-Referer attribution header, which was previously hardcoded to a
+    # Railway hostname and so kept pointing at the old deployment after a move.
+    public_base_url: str = "http://localhost:8000"
     max_file_size: int = 10485760  # 10 MB
     log_level: str = "INFO"
 
