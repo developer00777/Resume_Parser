@@ -1,0 +1,65 @@
+# Droplet deployment: the parser behind Caddy, which obtains and renews a
+# Let's Encrypt certificate automatically.
+#
+#   cd /opt/resume-parser
+#   cp .env.example .env && edit .env       # real secrets, never committed
+#   PARSER_DOMAIN=parser.example.com docker compose -f deploy/docker-compose.prod.yml up -d
+#
+# Choose this over App Platform when you need a STATIC EGRESS IP — a Droplet's
+# public IP is fixed, so it can be whitelisted in the Salesforce integration
+# user's Login IP Ranges. App Platform cannot be.
+#
+# Salesforce refuses callouts to self-signed certificates, which is why Caddy is
+# here rather than exposing uvicorn directly.
+
+services:
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    environment:
+      # The hostname the Named Credential points at. Caddy uses it to request
+      # the certificate, so it must already resolve to this Droplet.
+      - PARSER_DOMAIN=${PARSER_DOMAIN:?set PARSER_DOMAIN to the public hostname}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data       # certificates — losing this means re-issuing
+      - caddy-config:/config
+    depends_on:
+      - app
+
+  app:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    restart: unless-stopped
+    # No published ports: reachable only through Caddy, so uvicorn is never
+    # exposed to the internet without TLS.
+    expose:
+      - "8000"
+    env_file:
+      - ../.env
+    environment:
+      - PORT=8000
+      # One worker — see the note in docker/Dockerfile.
+      - WEB_CONCURRENCY=1
+      - PUBLIC_BASE_URL=https://${PARSER_DOMAIN}
+    healthcheck:
+      test: ["CMD", "python", "-c",
+             "import httpx,sys; sys.exit(0 if httpx.get('http://localhost:8000/health').status_code==200 else 1)"]
+      interval: 60s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  caddy-data:
+  caddy-config:

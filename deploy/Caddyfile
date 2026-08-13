@@ -1,0 +1,28 @@
+# Caddy obtains and renews a Let's Encrypt certificate for PARSER_DOMAIN with no
+# further configuration. Salesforce requires a certificate from a trusted CA —
+# it will not call out to a self-signed one.
+
+{$PARSER_DOMAIN} {
+	# A parse can take up to ~75s of LLM time. The default proxy read timeout
+	# would cut it off well before that and return a 502 to Salesforce, which
+	# would look like a parser failure rather than a proxy one.
+	reverse_proxy app:8000 {
+		transport http {
+			read_timeout 180s
+			write_timeout 180s
+		}
+	}
+
+	# /docs, /redoc and /openapi.json are unauthenticated by the app's own
+	# middleware. Blocking them at the edge keeps the full API surface off the
+	# public internet — see docs/REMAINING_WORK.md item 5.
+	@internal_docs path /docs* /redoc* /openapi.json
+	respond @internal_docs 404
+
+	encode gzip
+
+	log {
+		output stdout
+		format console
+	}
+}

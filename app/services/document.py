@@ -85,7 +85,10 @@ async def _ocr_pdf_via_vision(content: bytes) -> str:
         response = await client.post(
             "/chat/completions",
             json={
-                "model": settings.openrouter_model,
+                # The OCR model is configured separately from the extraction
+                # model — OPENROUTER_OCR_MODEL was previously declared and never
+                # read, so setting it had no effect.
+                "model": settings.openrouter_ocr_model,
                 "messages": [
                     {
                         "role": "user",

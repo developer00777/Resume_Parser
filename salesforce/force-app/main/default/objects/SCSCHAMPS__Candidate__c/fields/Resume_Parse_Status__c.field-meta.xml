@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<CustomField xmlns="http://soap.sforce.com/2006/04/metadata">
+    <fullName>Resume_Parse_Status__c</fullName>
+    <label>Resume Parse Status</label>
+    <type>LongTextArea</type>
+    <length>1000</length>
+    <visibleLines>3</visibleLines>
+    <required>false</required>
+    <trackHistory>false</trackHistory>
+    <description>Written by ResumeParserQueueable after each parse: how many fields were updated, and which sections failed to extract. A failed section means those fields were deliberately left untouched rather than blanked.</description>
+    <inlineHelpText>Result of the last resume parse. "NOT extracted" means those fields were left as they were, not cleared.</inlineHelpText>
+</CustomField>

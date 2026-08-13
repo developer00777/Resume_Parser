@@ -1,0 +1,85 @@
+# DigitalOcean App Platform spec.
+#
+#   doctl apps create --spec deploy/digitalocean-app.yaml
+#   doctl apps update <app-id> --spec deploy/digitalocean-app.yaml
+#
+# App Platform terminates TLS with a trusted certificate automatically, which
+# Salesforce requires — it refuses callouts to self-signed certs.
+#
+# BEFORE CHOOSING THIS OVER A DROPLET: App Platform has no stable egress IP.
+# If the Salesforce integration user's profile has Login IP Ranges set, calls
+# from here will be rejected unpredictably. Either tick "Relax IP restrictions"
+# in the Connected App's OAuth policies, or deploy to a Droplet instead
+# (deploy/docker-compose.prod.yml), which gives you a fixed IP to whitelist.
+name: resume-parser
+region: blr    # Bangalore — closest to the users and to the Salesforce instance
+
+services:
+  - name: api
+    dockerfile_path: docker/Dockerfile
+    source_dir: /
+
+    github:
+      repo: developer00777/Resume_Parser
+      branch: main
+      deploy_on_push: true
+
+    http_port: 8000
+
+    # One instance, one worker. The async /parse/job endpoints hold their job
+    # store in process memory, so a second instance would serve "job not found"
+    # for jobs the first one is running. Raise instance_count only after that
+    # store moves to Redis — see docs/REMAINING_WORK.md item 3.
+    instance_count: 1
+    instance_size_slug: basic-xs
+
+    health_check:
+      http_path: /health
+      initial_delay_seconds: 20
+      period_seconds: 30
+      timeout_seconds: 10
+      failure_threshold: 3
+
+    envs:
+      # ── Secrets ────────────────────────────────────────────────────────────
+      # type: SECRET values are encrypted at rest and hidden in the UI after the
+      # first save. Set the real values with `doctl apps update` or in the
+      # dashboard — never commit them here.
+      - key: OPENROUTER_API_KEY
+        scope: RUN_TIME
+        type: SECRET
+      - key: API_KEY
+        scope: RUN_TIME
+        type: SECRET
+      - key: SF_CLIENT_ID
+        scope: RUN_TIME
+        type: SECRET
+      - key: SF_CLIENT_SECRET
+        scope: RUN_TIME
+        type: SECRET
+
+      # ── Configuration ──────────────────────────────────────────────────────
+      - key: PUBLIC_BASE_URL
+        scope: RUN_TIME
+        value: ${APP_URL}          # App Platform substitutes the live URL
+      - key: OPENROUTER_MODEL
+        scope: RUN_TIME
+        value: openai/gpt-4o-mini
+      - key: OPENROUTER_OCR_MODEL
+        scope: RUN_TIME
+        value: openai/gpt-4o-mini
+      - key: SF_LOGIN_URL
+        scope: RUN_TIME
+        value: https://test.salesforce.com   # login.salesforce.com for production
+      - key: SF_API_VERSION
+        scope: RUN_TIME
+        value: "59.0"
+      - key: SF_DESCRIBE_TTL_MINUTES
+        scope: RUN_TIME
+        value: "60"
+      - key: LOG_LEVEL
+        scope: RUN_TIME
+        value: INFO
+      - key: WEB_CONCURRENCY
+        scope: RUN_TIME
+        value: "1"

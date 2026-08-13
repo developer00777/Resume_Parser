@@ -1,0 +1,34 @@
+<template>
+    <div class="slds-p-around_medium">
+        <p class="slds-text-body_regular slds-m-bottom_small">
+            Reads the resume attached to this candidate and fills in contact
+            details, skills, experience, education and scores.
+        </p>
+        <p class="slds-text-body_small slds-text-color_weak slds-m-bottom_medium">
+            This takes up to a minute. You can carry on working — the record
+            updates on its own, and <strong>Resume Parse Status</strong> will
+            show what changed.
+        </p>
+
+        <template if:true={working}>
+            <lightning-spinner
+                alternative-text="Queueing the parse"
+                size="small"
+            ></lightning-spinner>
+        </template>
+
+        <div class="slds-align_absolute-center slds-m-top_small">
+            <lightning-button
+                label="Cancel"
+                onclick={handleCancel}
+                class="slds-m-right_x-small"
+            ></lightning-button>
+            <lightning-button
+                variant="brand"
+                label="Parse Resume"
+                onclick={handleParse}
+                disabled={disabled}
+            ></lightning-button>
+        </div>
+    </div>
+</template>

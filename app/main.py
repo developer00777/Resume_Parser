@@ -24,6 +24,12 @@ async def lifespan(_app: FastAPI):
         logger.warning("OPENROUTER_API_KEY is not set — LLM calls will fail with 401.")
     else:
         logger.info(f"OpenRouter configured — model: {settings.openrouter_model}")
+    # Warm the org's field mapping so write-back is usable immediately after a
+    # deploy. Non-fatal: without it the upload endpoints still work, and
+    # ensure_loaded() retries on the first write-back request.
+    from app.services.salesforce_schema import load_at_startup
+    await load_at_startup()
+
     yield
     # Close the reusable HTTP client on shutdown
     from app.services.llm import _openrouter_client

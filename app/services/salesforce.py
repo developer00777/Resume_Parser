@@ -11,7 +11,7 @@ Handles:
 from __future__ import annotations
 
 import logging
-from io import BytesIO
+from urllib.parse import urlparse
 
 import httpx
 from fastapi import HTTPException
@@ -19,6 +19,14 @@ from fastapi import HTTPException
 from app.config import settings
 
 logger = logging.getLogger(__name__)
+
+# Non-Salesforce hosts a resume may legitimately be fetched from. Credentials
+# are never attached to these — the allowlist only decides reachability.
+_EXTERNAL_RESUME_HOSTS: set[str] = {
+    h.strip().lower()
+    for h in (settings.sf_external_resume_hosts or "").split(",")
+    if h.strip()
+}
 
 # ---------------------------------------------------------------------------
 # OAuth token cache  (in-memory; restarts or multi-process = re-auth)
@@ -141,24 +149,61 @@ async def fetch_resume_by_attachment_id(attachment_id: str) -> tuple[bytes, str]
 
 async def fetch_resume_by_url(resume_url: str) -> tuple[bytes, str]:
     """
-    Download a resume from an arbitrary URL stored in SCSCHAMPS__Resume_URL__c.
-    If the URL is a relative Salesforce path it is resolved against the
-    instance URL (requires a valid SF token).
+    Download a resume from a URL stored in SCSCHAMPS__Resume_URL__c.
+    Relative paths are resolved against the org's instance URL.
+
+    The Salesforce access token is attached ONLY when the resolved host is the
+    org itself. Previously it was sent to whatever host the caller named, with
+    redirects followed — which handed the org's token to any host an
+    authenticated caller chose, and let the endpoint be pointed at internal
+    addresses.
     """
     token, instance_url = await get_salesforce_token()
 
     if resume_url.startswith("/"):
         resume_url = instance_url + resume_url
 
-    headers = {"Authorization": f"Bearer {token}"}
-    async with httpx.AsyncClient(timeout=60.0, follow_redirects=True) as client:
+    parsed = urlparse(resume_url)
+    if parsed.scheme not in ("http", "https"):
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unsupported URL scheme '{parsed.scheme}'. Only http and https are allowed.",
+        )
+
+    instance_host = urlparse(instance_url).netloc.lower()
+    target_host = (parsed.hostname or "").lower()
+    is_salesforce_host = target_host == instance_host or target_host.endswith(
+        (".salesforce.com", ".force.com", ".documentforce.com")
+    )
+
+    if is_salesforce_host:
+        headers = {"Authorization": f"Bearer {token}"}
+    elif target_host in _EXTERNAL_RESUME_HOSTS:
+        # Explicitly allowlisted third-party store — reachable, but never with
+        # Salesforce credentials attached.
+        headers = {}
+        logger.info("Fetching resume from allowlisted external host %s", target_host)
+    else:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Refusing to fetch a resume from '{target_host}'. Add it to "
+                "SF_EXTERNAL_RESUME_HOSTS if it is a trusted resume store."
+            ),
+        )
+
+    # Redirects are not followed: a 302 to another host would re-send the
+    # Authorization header to wherever it pointed.
+    async with httpx.AsyncClient(timeout=60.0, follow_redirects=False) as client:
         try:
             resp = await client.get(resume_url, headers=headers)
             resp.raise_for_status()
         except httpx.HTTPStatusError as exc:
+            if exc.response.status_code == 401 and is_salesforce_host:
+                invalidate_token()
             raise HTTPException(
                 status_code=502,
-                detail=f"Failed to download resume from Salesforce URL: {exc.response.status_code}",
+                detail=f"Failed to download resume from URL: {exc.response.status_code}",
             )
 
     filename = _guess_filename(resp.headers, "resume", "pdf")
@@ -210,6 +255,82 @@ async def fetch_resume_from_candidate(record_id: str) -> tuple[bytes, str]:
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+CANDIDATE_SOBJECT = "SCSCHAMPS__Candidate__c"
+
+
+async def fetch_candidate_describe() -> dict:
+    """
+    Fetch the Describe for the Candidate sObject.
+
+    This is what makes the field mapping real rather than assumed: the org tells
+    us the actual API names, types, lengths and picklist value sets, so nothing
+    has to be hardcoded and an admin adding a field does not need a redeploy.
+    """
+    token, instance_url = await get_salesforce_token()
+    url = (
+        f"{instance_url}/services/data/v{settings.sf_api_version}"
+        f"/sobjects/{CANDIDATE_SOBJECT}/describe"
+    )
+
+    async with httpx.AsyncClient(timeout=60.0) as client:
+        resp = await client.get(url, headers={"Authorization": f"Bearer {token}"})
+
+    if resp.status_code == 401:
+        invalidate_token()
+        raise HTTPException(status_code=401, detail="Salesforce token expired. Retry the request.")
+    if resp.status_code == 404:
+        raise HTTPException(
+            status_code=404,
+            detail=f"'{CANDIDATE_SOBJECT}' does not exist in this org, or the "
+                   "integration user cannot see it.",
+        )
+    if resp.status_code != 200:
+        raise HTTPException(status_code=502, detail=f"Salesforce describe returned {resp.status_code}.")
+    return resp.json()
+
+
+async def update_candidate(record_id: str, fields: dict[str, object]) -> None:
+    """
+    PATCH resume-derived fields onto a Candidate record.
+
+    Salesforce rejects the whole record on any single bad field, so its error
+    body is surfaced — it names the offending field, which is the only practical
+    way to debug a mapping problem.
+    """
+    if not fields:
+        return
+
+    token, instance_url = await get_salesforce_token()
+    url = (
+        f"{instance_url}/services/data/v{settings.sf_api_version}"
+        f"/sobjects/{CANDIDATE_SOBJECT}/{record_id}"
+    )
+
+    async with httpx.AsyncClient(timeout=60.0) as client:
+        resp = await client.patch(
+            url,
+            headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+            json=fields,
+        )
+
+    # A successful PATCH returns 204 No Content.
+    if resp.status_code == 204:
+        logger.info("Updated %s %s with %d field(s)", CANDIDATE_SOBJECT, record_id, len(fields))
+        return
+
+    if resp.status_code == 401:
+        invalidate_token()
+        raise HTTPException(status_code=401, detail="Salesforce token expired. Retry the request.")
+    if resp.status_code == 404:
+        raise HTTPException(status_code=404, detail=f"Candidate record '{record_id}' not found.")
+
+    logger.error("Salesforce PATCH %s failed: %s — %s", record_id, resp.status_code, resp.text[:500])
+    raise HTTPException(
+        status_code=502,
+        detail=f"Salesforce rejected the update ({resp.status_code}): {resp.text[:500]}",
+    )
+
 
 def _guess_filename(headers: httpx.Headers, fallback_id: str, default_ext: str) -> str:
     cd = headers.get("content-disposition", "")

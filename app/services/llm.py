@@ -2,6 +2,7 @@ import asyncio
 import json
 import logging
 import re
+import time
 
 import httpx
 from fastapi import HTTPException
@@ -25,7 +26,7 @@ def _make_client() -> httpx.AsyncClient:
         headers={
             "Authorization": f"Bearer {settings.openrouter_api_key}",
             "Content-Type": "application/json",
-            "HTTP-Referer": "https://resumeparser-production-45b1.up.railway.app",
+            "HTTP-Referer": settings.public_base_url,
             "X-Title": "Resume Parser API",
         },
     )
@@ -464,33 +465,132 @@ _FULL_TEXT_THRESHOLD = 8000
 # OpenRouter client
 # ---------------------------------------------------------------------------
 
-async def _call_openrouter(prompt: str, max_tokens: int = 200) -> str:
-    """Make a single OpenRouter chat-completion call."""
-    client = _get_client()
-    try:
-        response = await client.post(
-            "/chat/completions",
-            json={
-                "model": settings.openrouter_model,
-                "messages": [{"role": "user", "content": prompt}],
-                "max_tokens": max_tokens,
-                "temperature": 0.0,
-                "response_format": {"type": "json_object"},
-            },
-        )
-        response.raise_for_status()
-    except httpx.ConnectError:
-        logger.error("Cannot connect to OpenRouter")
-        raise HTTPException(status_code=503, detail="OpenRouter service is unavailable.")
-    except httpx.TimeoutException:
-        logger.error("OpenRouter request timed out")
-        raise HTTPException(status_code=504, detail="LLM processing timed out.")
-    except httpx.HTTPStatusError as e:
-        logger.error(f"OpenRouter returned error: {e.response.status_code} — {e.response.text[:300]}")
-        raise HTTPException(status_code=502, detail=f"LLM service returned an error: {e.response.status_code}")
+# A bulk request fires up to 5 files x 3 chunks = 15 concurrent OpenRouter
+# calls, so 429s are expected rather than exceptional. Retry with backoff:
+# without it a rate-limited chunk returns nothing and the resume looks like it
+# simply had no experience section.
+_RETRY_STATUSES = frozenset({408, 409, 425, 429, 500, 502, 503, 504})
+_MAX_ATTEMPTS = 3
+_BACKOFF_BASE = 1.5
 
-    data = response.json()
-    return data["choices"][0]["message"]["content"]
+# Hard ceiling on total wall time for one chunk, retries included.
+#
+# Retrying must not cost more time than the callers have. The budgets it sits
+# inside: parse_resume allows 120 s overall, a bulk request 110 s, and a
+# Salesforce transaction caps *cumulative* callout time at 120 s. Chunks run in
+# parallel, so the slowest chunk sets the total — which makes this the number
+# that matters. Naive retries (3 x 45 s + backoff = 139 s) would exceed all
+# three, turning a fast failure into a timeout.
+_CALL_DEADLINE = 75.0
+
+
+async def _call_openrouter(prompt: str, max_tokens: int = 200) -> str:
+    """
+    Make an OpenRouter chat-completion call, retrying transient failures within
+    a fixed time budget.
+
+    Retries rate limits, timeouts and 5xx; gives up immediately on 400/401/403,
+    which will not improve. Honours Retry-After when the server sends a sane one.
+
+    Each attempt is given only the time left in the budget, so total wall time
+    stays bounded no matter how the failures fall. Cheap failures (a 429 that
+    returns in a second) retry freely; an attempt that burned the full timeout
+    does not get to burn it again.
+    """
+    client = _get_client()
+    started = time.monotonic()
+    last_error: Exception | None = None
+
+    for attempt in range(1, _MAX_ATTEMPTS + 1):
+        remaining = _CALL_DEADLINE - (time.monotonic() - started)
+        if remaining <= 0:
+            logger.error("OpenRouter: %.0fs budget exhausted after %d attempt(s)",
+                         _CALL_DEADLINE, attempt - 1)
+            raise HTTPException(status_code=504, detail="LLM processing timed out.")
+
+        try:
+            response = await client.post(
+                "/chat/completions",
+                json={
+                    "model": settings.openrouter_model,
+                    "messages": [{"role": "user", "content": prompt}],
+                    "max_tokens": max_tokens,
+                    "temperature": 0.0,
+                    "response_format": {"type": "json_object"},
+                },
+                timeout=min(_CHUNK_TIMEOUT, remaining),
+            )
+            response.raise_for_status()
+            data = response.json()
+            return data["choices"][0]["message"]["content"]
+
+        except httpx.HTTPStatusError as e:
+            status = e.response.status_code
+            if status not in _RETRY_STATUSES or attempt == _MAX_ATTEMPTS:
+                logger.error(f"OpenRouter returned error: {status} — {e.response.text[:300]}")
+                raise HTTPException(
+                    status_code=502, detail=f"LLM service returned an error: {status}",
+                )
+            last_error = e
+            delay = _retry_after(e.response) or _BACKOFF_BASE ** attempt
+            if not await _wait_if_budget_allows(delay, started, status, attempt):
+                raise HTTPException(
+                    status_code=502, detail=f"LLM service returned an error: {status}",
+                )
+
+        except httpx.TimeoutException as e:
+            if attempt == _MAX_ATTEMPTS:
+                logger.error("OpenRouter request timed out")
+                raise HTTPException(status_code=504, detail="LLM processing timed out.")
+            last_error = e
+            delay = _BACKOFF_BASE ** attempt
+            if not await _wait_if_budget_allows(delay, started, "timeout", attempt):
+                raise HTTPException(status_code=504, detail="LLM processing timed out.")
+
+        except httpx.ConnectError:
+            logger.error("Cannot connect to OpenRouter")
+            raise HTTPException(status_code=503, detail="OpenRouter service is unavailable.")
+
+    # Unreachable: the loop either returns or raises on its final attempt.
+    raise HTTPException(status_code=502, detail=f"LLM service unavailable: {last_error}")
+
+
+async def _wait_if_budget_allows(
+    delay: float, started: float, reason: object, attempt: int
+) -> bool:
+    """
+    Sleep before the next attempt, but only if there is time left to make one.
+
+    Returns False when the budget is spent, so the caller fails now rather than
+    sleeping and then failing anyway.
+    """
+    elapsed = time.monotonic() - started
+    # Require the backoff plus a few seconds for the attempt itself to be
+    # worthwhile — a one-second window is not a retry, just a slower failure.
+    if elapsed + delay + 5.0 >= _CALL_DEADLINE:
+        logger.warning(
+            "OpenRouter %s (attempt %d/%d) — not retrying, only %.1fs of the %.0fs budget left",
+            reason, attempt, _MAX_ATTEMPTS, _CALL_DEADLINE - elapsed, _CALL_DEADLINE,
+        )
+        return False
+
+    logger.warning(
+        f"OpenRouter {reason} (attempt {attempt}/{_MAX_ATTEMPTS}) — retrying in {delay:.1f}s"
+    )
+    await asyncio.sleep(delay)
+    return True
+
+
+def _retry_after(response: httpx.Response) -> float | None:
+    """Seconds to wait per the server's Retry-After header, if it sent a sane one."""
+    raw = response.headers.get("retry-after")
+    if not raw:
+        return None
+    try:
+        seconds = float(raw)
+    except ValueError:
+        return None  # HTTP-date form — fall back to our own backoff
+    return seconds if 0 < seconds <= 30 else None
 
 
 def _clean_response(raw: str) -> str:
@@ -762,17 +862,45 @@ def _compute_score(parsed: dict) -> dict:
 # Parallel parsing
 # ---------------------------------------------------------------------------
 
-async def _call_chunk(chunk_name: str, prompt: str, max_tok: int, chunk_text: str) -> tuple[str, dict]:
-    """Call OpenRouter for a single chunk and return (name, extracted_data)."""
+# Which parsed sections each chunk is the sole source of. When a chunk fails,
+# every section listed here came back empty because the *call* failed — not
+# because the resume was silent. A consumer writing to a system of record must
+# be able to tell those apart, or it will blank real data.
+CHUNK_SECTIONS: dict[str, tuple[str, ...]] = {
+    "chunk_a": ("contact", "personal", "professional_meta"),
+    "chunk_b": ("skills", "certifications", "awards", "summary", "projects"),
+    "chunk_c": ("experience", "education"),
+}
+
+
+async def _call_chunk(
+    chunk_name: str, prompt: str, max_tok: int, chunk_text: str
+) -> tuple[str, dict, str | None]:
+    """
+    Call OpenRouter for a single chunk.
+
+    Returns (name, extracted_data, error). `error` is None on success and a
+    short message on failure. Failures are still swallowed — one dead chunk
+    should not lose the other two — but they are now *reported* rather than
+    indistinguishable from an empty result.
+    """
     try:
         logger.info(f"Chunk '{chunk_name}': sending {len(chunk_text)} chars, max_tok={max_tok}")
         raw = await _call_openrouter(prompt + chunk_text, max_tokens=max_tok)
         data = _extract_json(raw)
+        if not data:
+            # The call succeeded but nothing parsed out of the response — a
+            # truncated or malformed completion, not an empty resume.
+            logger.warning(f"Chunk '{chunk_name}' returned no parseable JSON")
+            return chunk_name, {}, "response contained no parseable JSON"
         logger.info(f"Chunk '{chunk_name}' extracted {len(data)} fields")
-        return chunk_name, data
+        return chunk_name, data, None
+    except HTTPException as e:
+        logger.error(f"Chunk '{chunk_name}' failed: {e.detail}")
+        return chunk_name, {}, str(e.detail)
     except Exception as e:
         logger.error(f"Chunk '{chunk_name}' failed: {e}")
-        return chunk_name, {}
+        return chunk_name, {}, f"{type(e).__name__}: {e}"
 
 
 async def parse_resume(text: str) -> dict:
@@ -790,6 +918,12 @@ async def parse_resume(text: str) -> dict:
     """
     text = _normalise_text(text)
     chunk_text = text[:_FULL_TEXT_THRESHOLD]
+    truncated = len(text) > _FULL_TEXT_THRESHOLD
+    if truncated:
+        logger.warning(
+            "parse_resume: resume is %d chars, only the first %d were sent to the model",
+            len(text), _FULL_TEXT_THRESHOLD,
+        )
 
     coroutines = [
         _call_chunk(name, prompt, max_tok, chunk_text)
@@ -807,7 +941,10 @@ async def parse_resume(text: str) -> dict:
 
     # Unpack 3-chunk results into per-section dicts
     parsed: dict = {}
-    for chunk_name, data in results:
+    chunk_errors: dict[str, str] = {}
+    for chunk_name, data, error in results:
+        if error:
+            chunk_errors[chunk_name] = error
         if chunk_name == "chunk_a":
             parsed["contact"]           = data.get("contact", {})
             parsed["personal"]          = data.get("personal", {})
@@ -898,6 +1035,36 @@ async def parse_resume(text: str) -> dict:
         "awards":             award_data.get("awards", []),
         "summary":            summary_data.get("summary"),
         "resume_score":       score,
+
+        # Which chunks failed, and therefore which sections are empty because
+        # the LLM call died rather than because the resume said nothing. A
+        # caller writing to Salesforce must skip the affected fields instead of
+        # overwriting real data with blanks.
+        "extraction":         _extraction_status(chunk_errors, truncated, len(text)),
+    }
+
+
+def _extraction_status(
+    chunk_errors: dict[str, str], truncated: bool, text_length: int
+) -> dict:
+    """Summarise chunk outcomes into something a consumer can act on."""
+    failed_sections = sorted(
+        section
+        for chunk_name in chunk_errors
+        for section in CHUNK_SECTIONS.get(chunk_name, ())
+    )
+    return {
+        "complete": not chunk_errors and not truncated,
+        "chunks_total": len(CHUNKS),
+        "chunks_ok": len(CHUNKS) - len(chunk_errors),
+        "failed_chunks": sorted(chunk_errors),
+        "failed_sections": failed_sections,
+        "errors": dict(chunk_errors),
+        # The resume was longer than the window sent to the model, so the tail
+        # (usually earlier employment) was never seen.
+        "text_truncated": truncated,
+        "text_length": text_length,
+        "text_sent": min(text_length, _FULL_TEXT_THRESHOLD),
     }
 
 

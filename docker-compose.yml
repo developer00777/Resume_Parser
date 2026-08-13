@@ -8,10 +8,19 @@ services:
     environment:
       - OPENROUTER_API_KEY=${OPENROUTER_API_KEY}
       - OPENROUTER_MODEL=${OPENROUTER_MODEL:-openai/gpt-4o-mini}
+      - OPENROUTER_OCR_MODEL=${OPENROUTER_OCR_MODEL:-openai/gpt-4o-mini}
       - OPENROUTER_BASE_URL=${OPENROUTER_BASE_URL:-https://openrouter.ai/api/v1}
       - API_KEY=${API_KEY:-changeme}
+      - PUBLIC_BASE_URL=${PUBLIC_BASE_URL:-http://localhost:8000}
       - MAX_FILE_SIZE=${MAX_FILE_SIZE:-10485760}
       - LOG_LEVEL=${LOG_LEVEL:-INFO}
+      # Salesforce — without these every /api/v1/salesforce/* route returns 503.
+      - SF_CLIENT_ID=${SF_CLIENT_ID}
+      - SF_CLIENT_SECRET=${SF_CLIENT_SECRET}
+      - SF_LOGIN_URL=${SF_LOGIN_URL:-https://login.salesforce.com}
+      - SF_API_VERSION=${SF_API_VERSION:-59.0}
+      - SF_EXTERNAL_RESUME_HOSTS=${SF_EXTERNAL_RESUME_HOSTS:-}
+      - SF_DESCRIBE_TTL_MINUTES=${SF_DESCRIBE_TTL_MINUTES:-60}
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "python", "-c", "import httpx; httpx.get('http://localhost:8000/health')"]
