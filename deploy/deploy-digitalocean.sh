@@ -22,7 +22,12 @@ set -euo pipefail
 
 APP_NAME="${APP_NAME:-resume-parser}"
 REGISTRY_NAME="${REGISTRY_NAME:-}"
-REGION="${REGION:-blr}"
+# DigitalOcean uses two different region namespaces, and mixing them up gives a
+# 422 that names no alternative:
+#   App Platform      -> short slugs   (blr, nyc, fra ...)   `doctl apps list-regions`
+#   Container Registry -> compute slugs (blr1, nyc3, fra1 ...) `doctl registry options available-regions`
+REGION="${REGION:-blr}"                      # App Platform
+REGISTRY_REGION="${REGISTRY_REGION:-blr1}"   # Container Registry
 IMAGE_TAG="${IMAGE_TAG:-$(git rev-parse --short HEAD 2>/dev/null || echo latest)}"
 
 die() { printf '\nERROR: %s\n' "$*" >&2; exit 1; }
@@ -45,8 +50,12 @@ if [[ -z "$REGISTRY_NAME" ]]; then
 fi
 [[ -n "$REGISTRY_NAME" ]] || die \
 "No container registry found. Create one first (it has a monthly cost):
-     doctl registry create <name> --region $REGION
-   then re-run this script."
+
+     doctl registry create champ-registry --region $REGISTRY_REGION
+
+   Note the region slug: the registry wants '$REGISTRY_REGION', not the App
+   Platform form '$REGION'. Full list: doctl registry options available-regions
+   Then re-run this script."
 echo "  registry: $REGISTRY_NAME"
 
 IMAGE="registry.digitalocean.com/${REGISTRY_NAME}/${APP_NAME}"
