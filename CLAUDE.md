@@ -2,9 +2,10 @@
 
 ## Project Overview
 
-FastAPI-based REST API that parses PDF/DOCX resume files and extracts structured data using a local Ollama LLM. Supports two output modes:
+FastAPI-based REST API that parses PDF/DOCX resume files and extracts structured data using OpenRouter. Supports three output modes:
 - **Web-app mode** — generic JSON response (`/api/v1/parse`)
-- **Salesforce mode** — SCSCHAMPS-mapped JSON, pulls resumes directly from Salesforce via OAuth2 (`/api/v1/salesforce/*`)
+- **Salesforce read mode** — SCSCHAMPS-mapped JSON, pulls resumes directly from Salesforce via OAuth2 (`/api/v1/salesforce/parse-*`)
+- **Salesforce write-back** — parses and PATCHes the fields onto the Candidate record (`/api/v1/salesforce/parse-and-update`)
 
 Both modes are available simultaneously on the same running server.
 
@@ -32,8 +33,10 @@ app/
 │   └── salesforce.py        # /api/v1/salesforce/*           (Salesforce endpoints)
 ├── services/
 │   ├── document.py          # PDF/DOCX extraction; OCR fallback for image-based PDFs
-│   ├── llm.py               # OpenRouter integration, 3 consolidated prompts, score computation
-│   └── salesforce.py        # OAuth2 token flow + resume file fetch from SF
+│   ├── llm.py               # OpenRouter integration, 3 parallel prompts, retry, score computation
+│   ├── salesforce.py        # OAuth2 token flow, resume fetch, sObject describe, record PATCH
+│   ├── salesforce_coerce.py # Describe-driven field mapping + value coercion
+│   └── salesforce_schema.py # Field-mapping lifecycle: startup load, TTL refresh, lazy retry
 ├── schemas/response.py      # Pydantic models: ResumeData, SalesforceResumeData,
 │                            #   map_to_salesforce(), ParseResponse, etc.
 └── middleware/auth.py        # X-API-Key middleware
@@ -49,6 +52,13 @@ tests/
 .github/workflows/
 └── ci.yml                   # CI: lint → test → docker-build
 pytest.ini                   # Pytest config (asyncio_mode=auto)
+salesforce/                  # SFDX source — deploy with `sf project deploy start -d salesforce/force-app`
+└── force-app/main/default/
+    ├── classes/             # ResumeParserQueueable, ResumeParserAction (+ tests)
+    ├── lwc/resumeParser/    # "Parse Resume" quick-action component
+    ├── objects/.../fields/  # Resume_Parse_Status__c
+    └── quickActions/        # Parse Resume button
+docs/SALESFORCE_INTEGRATION.md   # Step-by-step org setup runbook
 ```
 
 ## Commands
@@ -80,9 +90,11 @@ docker-compose logs -f app
 
 | Method | Path | Auth | Description |
 |--------|------|------|-------------|
-| GET | `/health` | No | Health check + Ollama status |
-| POST | `/api/v1/parse` | X-API-Key | Upload PDF/DOCX → generic JSON |
-| GET | `/api/v1/models` | X-API-Key | List Ollama models |
+| GET | `/health` | No | Health check + OpenRouter status |
+| POST | `/api/v1/parse` | X-API-Key | Upload 1–15 PDF/DOCX → generic JSON |
+| POST | `/api/v1/parse/salesforce` | X-API-Key | Upload 1–15 → SCSCHAMPS JSON |
+| POST | `/api/v1/parse/job` | X-API-Key | Async bulk submit → job_id (single-process only) |
+| GET | `/api/v1/models` | X-API-Key | Configured OpenRouter model |
 
 ### Salesforce
 
@@ -90,7 +102,10 @@ docker-compose logs -f app
 |--------|------|------|-------------|
 | POST | `/api/v1/salesforce/parse-candidate` | X-API-Key | Record ID → fetch resume from SF → SCSCHAMPS JSON |
 | POST | `/api/v1/salesforce/parse-attachment` | X-API-Key | ContentVersion/Attachment ID → SCSCHAMPS JSON |
-| POST | `/api/v1/salesforce/parse-url` | X-API-Key | Resume URL (SF or external) → SCSCHAMPS JSON |
+| POST | `/api/v1/salesforce/parse-url` | X-API-Key | Resume URL (SF or allowlisted host) → SCSCHAMPS JSON |
+| POST | `/api/v1/salesforce/parse-and-update` | X-API-Key | Record ID → parse → **PATCH the record**. `dry_run=true` validates without writing |
+| POST | `/api/v1/salesforce/describe/reload` | X-API-Key | Rebuild the field mapping from a live Describe |
+| GET | `/api/v1/salesforce/describe/status` | X-API-Key | Mapping state: age, unresolved and read-only fields |
 
 ## Configuration
 
@@ -119,6 +134,8 @@ All env vars — see `.env.example` for full list.
 | `SF_SECURITY_TOKEN` | (Optional) SF security token |
 | `SF_LOGIN_URL` | `https://login.salesforce.com` or `https://test.salesforce.com` |
 | `SF_API_VERSION` | `59.0` |
+| `SF_EXTERNAL_RESUME_HOSTS` | Comma-separated non-Salesforce hosts `parse-url` may fetch from. The SF token is **never** sent to these. Empty = Salesforce-hosted only |
+| `SF_DESCRIBE_TTL_MINUTES` | How long the field mapping stays trusted before re-fetching (default 60, 0 = never) |
 
 ## Salesforce Integration Notes
 
@@ -138,11 +155,34 @@ Pipeline: `lint → test → docker-build`
 - Test results uploaded as artifact (`test-results/results.xml`)
 - Optional Docker Hub push (uncomment in `.github/workflows/ci.yml`, set secrets)
 
+## Salesforce Write-Back
+
+**The parser owns the write, not Apex.** Apex cannot host this work: identifiers
+are case-insensitive (so a wrapper cannot hold both `Resume_Score` and a nested
+`resume_score`), `Date.valueOf()` throws on free-text dates and takes the whole
+DML with it, restricted picklists reject free text the same way, and heap is
+6 MB. So Apex sends a record ID and reads back a summary.
+
+- **Field mapping is derived, not hardcoded.** `load_specs_from_describe()`
+  tries `SCSCHAMPS__X__c`, `X__c`, then `X` against the org's real schema. This
+  is what makes the same build work against a namespaced managed-package org and
+  a locally-customised one.
+- **Loaded at startup**, refreshed on `SF_DESCRIBE_TTL_MINUTES`, and retried
+  lazily on first use if the startup load failed. Write-back returns **409**
+  while no mapping is loaded — writing against assumed names could write to the
+  wrong field.
+- **Fields are withheld, never blanked.** A field is skipped when it is None,
+  when Salesforce owns it (`_ORG_OWNED_FIELDS`), when the LLM chunk that
+  produces it failed, or when the org has no updateable field of that name.
+- **`extraction`** on every response reports failed chunks, the sections they
+  owned, and whether the resume was truncated — so an empty field can be told
+  apart from a failed call.
+
 ## Key Architecture Patterns
 
 - **Dual-mode output:** Same parsing pipeline; `map_to_salesforce()` converts the result for SF
 - **Stateless:** Files processed in memory, nothing persisted to disk
-- **Async throughout:** httpx async client reused across Ollama calls
+- **Async throughout:** httpx async client reused across OpenRouter calls
 - **Graceful degradation:** Empty fields returned on LLM extraction failure (no crash)
 - **Auth middleware:** `X-API-Key` on all `/api/v1/*`; public: `/health`, `/docs`, `/redoc`
 - **LLM:** temperature=0.0, 3 consolidated prompts fired in parallel (Chunk A: contact+personal+meta 950tok, Chunk B: skills+certs+awards+summary+projects 2100tok, Chunk C: experience+education 2600tok)

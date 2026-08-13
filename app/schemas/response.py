@@ -190,7 +190,10 @@ class SalesforceResumeData(BaseModel):
     Highest_Degree: str | None = None             # Highest_Degree__c
     education_start_year: int | None = None       # education_start_year__c
     Education_End_Year: int | None = None         # Education_End_Year__c
-    Education_year: bool = False                  # Education_year__c (required boolean)
+    # Nullable, not False-by-default. A boolean that is always present gets
+    # assigned on every parse, so a False default silently clears whatever
+    # Salesforce already held whenever the resume says nothing about it.
+    Education_year: bool | None = None            # Education_year__c
     educationDetail: str | None = None            # educationDetail__c
     Qualification_1: str | None = None            # Qualification_1__c
     Qualification_1_Type: str | None = None       # Qualification_1_Type__c
@@ -218,7 +221,11 @@ class SalesforceResumeData(BaseModel):
     # ── Scoring ─────────────────────────────────────────────────────────────
     Candidate_Score: int | None = None            # Candidate_Score__c
     Resume_Score: float | None = None             # Resume_Score__c
-    resume_score: ResumeScore = ResumeScore()     # detailed breakdown
+    # Named score_breakdown, NOT resume_score: Apex identifiers are
+    # case-insensitive, so a wrapper class cannot declare both `Resume_Score`
+    # and `resume_score`. With the old name, JSON.deserialize into a typed Apex
+    # class does not compile and callers are forced onto deserializeUntyped.
+    score_breakdown: ResumeScore = ResumeScore()
 
     # ── Candidate Meta (populated by Salesforce, not resume) ────────────────
     Candidate_Status: str | None = None           # SCSCHAMPS__Candidate_Status__c
@@ -230,15 +237,65 @@ class SalesforceResumeData(BaseModel):
     job: str | None = None                        # SCSCHAMPS__job__c
     Lead: str | None = None                       # SCSCHAMPS__Lead__c
     Recruiter: str | None = None                  # SCSCHAMPS__Recruiter__c
-    converted_from_lead: bool = False             # SCSCHAMPS__converted_from_lead__c
-    Ampliz_Contact: bool = False                  # SCSCHAMPS__Ampliz_Contact__c
+    # Nullable for the same reason as Education_year — a resume never carries
+    # these, so they must never be written from a parse result.
+    converted_from_lead: bool | None = None       # SCSCHAMPS__converted_from_lead__c
+    Ampliz_Contact: bool | None = None            # SCSCHAMPS__Ampliz_Contact__c
     Ampliz_Talent_Name: str | None = None         # SCSCHAMPS__Ampliz_Talent_Name__c
+
+
+class ExtractionStatus(BaseModel):
+    """
+    Whether the parse actually saw the whole resume and got an answer from every
+    LLM call.
+
+    Without this, an empty field is ambiguous: the resume may have had no
+    experience section, or the chunk that extracts experience may have been rate
+    limited. The first is data; the second is a failure that must not be written
+    to a system of record.
+    """
+    complete: bool = True
+    chunks_total: int = 0
+    chunks_ok: int = 0
+    failed_chunks: list[str] = Field(default_factory=list)
+    failed_sections: list[str] = Field(
+        default_factory=list,
+        description="Sections empty because their LLM call failed, not because the resume was silent",
+    )
+    errors: dict[str, str] = Field(default_factory=dict)
+    text_truncated: bool = False
+    text_length: int = 0
+    text_sent: int = 0
+
+
+def extraction_from_parsed(parsed: dict) -> ExtractionStatus:
+    raw = parsed.get("extraction")
+    return ExtractionStatus(**raw) if isinstance(raw, dict) else ExtractionStatus()
 
 
 class SalesforceParseResponse(BaseModel):
     success: bool
     data: SalesforceResumeData
     processing_time_ms: float
+    extraction: ExtractionStatus = Field(default_factory=ExtractionStatus)
+
+
+class SalesforceUpdateResponse(BaseModel):
+    """Result of parsing a resume and writing the fields back onto the record."""
+    success: bool
+    record_id: str
+    dry_run: bool = Field(
+        False, description="True when the payload was computed and validated but not written",
+    )
+    fields_written: dict[str, object] = Field(
+        default_factory=dict,
+        description="Salesforce API name -> value actually sent (or that would be sent)",
+    )
+    fields_skipped: dict[str, str] = Field(
+        default_factory=dict, description="Logical field name -> why it was withheld",
+    )
+    extraction: ExtractionStatus = Field(default_factory=ExtractionStatus)
+    processing_time_ms: float = 0.0
 
 
 # ── Shared utility models ─────────────────────────────────────────────────────
@@ -331,26 +388,6 @@ def _extract_state(location: str | None) -> str | None:
     return parts[1] if len(parts) > 1 else None
 
 
-def _parse_ctc_to_number(ctc_str: str | None) -> float | None:
-    """Try to extract a numeric value from a CTC string like '12 LPA', '₹15,00,000'."""
-    if not ctc_str:
-        return None
-    import re
-    # Remove currency symbols and whitespace
-    cleaned = re.sub(r'[₹$,\s]', '', ctc_str.upper())
-    # Try to find a number
-    match = re.search(r'(\d+(?:\.\d+)?)', cleaned)
-    if not match:
-        return None
-    value = float(match.group(1))
-    # Convert LPA/Lakhs to raw number
-    if 'LPA' in cleaned or 'LAKH' in cleaned or 'LAC' in cleaned:
-        value = value * 100000
-    elif 'CR' in cleaned:
-        value = value * 10000000
-    return value
-
-
 def _parse_duration_years(duration_str: str | None) -> float | None:
     """Extract numeric duration from strings like '2.5 years', '3 yrs'."""
     if not duration_str:
@@ -361,8 +398,18 @@ def _parse_duration_years(duration_str: str | None) -> float | None:
 
 
 def map_to_salesforce(parsed: dict, raw_text: str | None = None) -> SalesforceResumeData:
-    """Map the internal parsed dict to SalesforceResumeData field names."""
+    """
+    Map the internal parsed dict to SalesforceResumeData field names.
+
+    Values are coerced into shapes Salesforce accepts on the way out — dates to
+    ISO, compensation to a number where the field is numeric, picklists snapped
+    to their value set, long text clipped to its declared length. Anything that
+    cannot be coerced becomes None: Salesforce rejects a whole record over one
+    bad value, so a null field is always cheaper than a rejected DML.
+    """
     from datetime import date
+
+    from app.services.salesforce_coerce import iso_date, money_or_text, pick, truncate
 
     skills: list[str] = parsed.get("skills", [])
     primary_skills: list[str] = parsed.get("primary_skills", [])
@@ -421,7 +468,11 @@ def map_to_salesforce(parsed: dict, raw_text: str | None = None) -> SalesforceRe
     edu_second = education[1] if len(education) > 1 else {}
     edu_start_year = edu_first.get("start_year")
     edu_end_year = edu_first.get("end_year")
-    has_edu_year = bool(edu_start_year or edu_end_year)
+    # None, not False, when the resume carried no education section at all —
+    # otherwise every parse writes False over whatever Salesforce held.
+    has_edu_year: bool | None = (
+        bool(edu_start_year or edu_end_year) if education else None
+    )
 
     # Education summary string
     edu_str = parsed.get("highest_degree") or edu_first.get("degree")
@@ -444,9 +495,11 @@ def map_to_salesforce(parsed: dict, raw_text: str | None = None) -> SalesforceRe
         MobilePhone=parsed.get("phone"),
         LinkedIn_URL=parsed.get("linkedin_url"),
         Web_address=parsed.get("web_address"),
-        DateOfBirth=parsed.get("date_of_birth"),
-        Birthdate=parsed.get("date_of_birth"),
-        Gender=parsed.get("gender"),
+        # Both are Salesforce Date fields — they take yyyy-MM-dd and nothing
+        # else. The LLM emits whatever the resume said ("12 May 1990").
+        DateOfBirth=iso_date(parsed.get("date_of_birth")),
+        Birthdate=iso_date(parsed.get("date_of_birth")),
+        Gender=pick(parsed.get("gender"), "Gender"),
         Blood_Group=parsed.get("blood_group"),
         Father_s_Name=parsed.get("father_name"),
         MotherName=parsed.get("mother_name"),
@@ -470,8 +523,10 @@ def map_to_salesforce(parsed: dict, raw_text: str | None = None) -> SalesforceRe
         Department=current_exp.get("department"),
         Years_of_Experience=parsed.get("total_years_of_experience"),
         No_of_companies_worked_in=parsed.get("number_of_companies"),
-        Current_Employment=parsed.get("current_employment_status"),
-        Industry=parsed.get("industry"),
+        # Restricted picklists in most orgs — free-text LLM output would fail
+        # the record with INVALID_OR_NULL_FOR_RESTRICTED_PICKLIST.
+        Current_Employment=pick(parsed.get("current_employment_status"), "Current_Employment"),
+        Industry=pick(parsed.get("industry"), "Industry"),
 
         # Skills
         Primary_Skills=primary_skill_list,
@@ -499,18 +554,21 @@ def map_to_salesforce(parsed: dict, raw_text: str | None = None) -> SalesforceRe
         Awards=awards_text,
 
         # Compensation / Availability
-        Current_CTC=parsed.get("current_ctc"),
-        Expected_CTC=parsed.get("expected_ctc"),
-        Notice_Period=parsed.get("notice_period"),
+        # Currency in some orgs, Text in others.
+        Current_CTC=money_or_text(parsed.get("current_ctc"), "Current_CTC"),
+        Expected_CTC=money_or_text(parsed.get("expected_ctc"), "Expected_CTC"),
+        Notice_Period=pick(parsed.get("notice_period"), "Notice_Period"),
 
-        # Resume content
-        ResumeRich=resume_rich,
-        Resume=resume_text,
-        TextResume=raw_text,
+        # Resume content — clipped to each field's declared length. A Text Area
+        # caps at 255 and a Long Text Area at 131,072; one character over
+        # either fails the record with STRING_TOO_LONG.
+        ResumeRich=truncate(resume_rich, "ResumeRich"),
+        Resume=truncate(resume_text, "Resume"),
+        TextResume=truncate(raw_text, "TextResume"),
         Date_Parsed_Text=date.today().isoformat(),
 
         # Scoring
         Candidate_Score=score_obj.overall,
         Resume_Score=float(score_obj.overall),
-        resume_score=score_obj,
+        score_breakdown=score_obj,
     )
