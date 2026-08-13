@@ -28,7 +28,15 @@ class Settings(BaseSettings):
     sf_password: str = ""
     sf_security_token: str = ""     # Append to password for IP-unrestricted orgs
 
-    sf_login_url: str = "https://login.salesforce.com"  # use test.salesforce.com for sandbox
+    # MUST be the org's My Domain URL, e.g.
+    #   https://acme.my.salesforce.com                     (production)
+    #   https://acme--demosbx.sandbox.my.salesforce.com    (sandbox)
+    #
+    # NOT login.salesforce.com or test.salesforce.com. The Client Credentials
+    # Flow is rejected on those with:
+    #   invalid_grant: request not supported on this domain
+    # They only work for the username-password flow, which modern orgs disable.
+    sf_login_url: str = "https://login.salesforce.com"
     sf_api_version: str = "59.0"
 
     # Comma-separated hosts, besides the org itself, that /salesforce/parse-url

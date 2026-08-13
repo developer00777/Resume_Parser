@@ -81,8 +81,23 @@ prompt_secret API_KEY            "API_KEY for this service (must match the X-API
 prompt_secret SF_CLIENT_ID       "Salesforce Consumer Key"
 prompt_secret SF_CLIENT_SECRET   "Salesforce Consumer Secret"
 
-SF_LOGIN_URL="${SF_LOGIN_URL:-https://test.salesforce.com}"
-echo "  Salesforce login URL: $SF_LOGIN_URL  (override with SF_LOGIN_URL=...)"
+# Client Credentials requires the org's My Domain host. login.salesforce.com and
+# test.salesforce.com both reject it with "request not supported on this domain",
+# so there is no safe default to fall back to — ask.
+if [[ -z "${SF_LOGIN_URL:-}" ]]; then
+    echo
+    echo "  Salesforce My Domain URL (NOT login/test.salesforce.com)."
+    echo "  Find it in Setup -> My Domain, or copy it from the address bar after logging in."
+    echo "  e.g. https://acme--demosbx.sandbox.my.salesforce.com"
+    read -rp "  My Domain URL: " SF_LOGIN_URL
+fi
+SF_LOGIN_URL="${SF_LOGIN_URL%/}"
+[[ "$SF_LOGIN_URL" == *my.salesforce.com* ]] || die \
+"'$SF_LOGIN_URL' is not a My Domain URL. The Client Credentials Flow is
+   rejected on login.salesforce.com and test.salesforce.com with
+   'invalid_grant: request not supported on this domain'.
+   Use the host from Setup -> My Domain instead."
+echo "  Salesforce login URL: $SF_LOGIN_URL"
 
 # ── Build and push ───────────────────────────────────────────────────────────
 step "Building image ${IMAGE}:${IMAGE_TAG}"

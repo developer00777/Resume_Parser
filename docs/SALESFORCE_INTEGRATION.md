@@ -195,10 +195,29 @@ Variables, or `.env` on a Droplet):
 | `API_KEY` | a strong random string — the same value as the `X-API-Key` header in 3a |
 | `SF_CLIENT_ID` | Consumer Key from step 2 |
 | `SF_CLIENT_SECRET` | Consumer Secret from step 2 |
-| `SF_LOGIN_URL` | `https://test.salesforce.com` for a sandbox, `https://login.salesforce.com` for production |
+| `SF_LOGIN_URL` | **The org's My Domain URL** — see the warning below |
 | `SF_API_VERSION` | `59.0` or later |
 | `SF_DESCRIBE_TTL_MINUTES` | `60` |
 | `PUBLIC_BASE_URL` | The parser's own public URL, e.g. `https://parser.example.com` |
+
+> ### `SF_LOGIN_URL` must be the My Domain URL
+>
+> **Not** `login.salesforce.com` or `test.salesforce.com`. The Client
+> Credentials Flow is rejected on those with:
+>
+> ```
+> invalid_grant: request not supported on this domain
+> ```
+>
+> Find it in **Setup → Company Settings → My Domain**, or copy it out of the
+> address bar after logging into the org. It looks like:
+>
+> - Production: `https://acme.my.salesforce.com`
+> - Sandbox: `https://acme--demosbx.sandbox.my.salesforce.com`
+>
+> This is the single most confusing failure in the whole setup, because
+> `test.salesforce.com` is correct for the older username-password flow and the
+> error message does not say what to use instead.
 
 Leave `SF_USERNAME` / `SF_PASSWORD` **empty** — setting them switches the
 service to the password grant, which step 2 deliberately avoided.
