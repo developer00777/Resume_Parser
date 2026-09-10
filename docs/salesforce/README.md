@@ -4,6 +4,9 @@
 into a single Apex Class in Setup. The two Queueables are inner classes, so
 there is nothing else to create.
 
+`ResumeParserServiceTest.cls` is the matching test class — needed only to deploy
+to production (see below).
+
 Delete the old `ResumeParserQueueable` class — nothing references it any more.
 
 ## Before you save it
@@ -83,11 +86,24 @@ behaviour is preserved; set `SKIP_WHEN_NO_EMAIL = true` to actually skip.
 sandboxes have no chain-depth limit, but a **Developer Edition** org caps it at
 5 — there, lower `MAX_TICKS`.
 
-## Deploying to production later
+## Test class
 
-Saving this class in a sandbox needs no test class. Deploying to **production**
-requires 75% Apex coverage, so a test class will be needed at that point — ask
-and it can be added back.
+`ResumeParserServiceTest.cls` covers the production class for the 75% coverage
+gate. A sandbox will save `ResumeParserService` without it; production will not
+deploy without it.
+
+Every callout is mocked, so it needs no network and no live parser. It asserts
+the client endpoint is the one being called and that `MaritalStatus__c`,
+`Gender__c`, `Nationality__c`, `Type_1__c` and `Spoken_Language__c` actually
+populate — so the wrong-endpoint regression cannot come back silently.
+
+```bash
+sf apex run test --class-names ResumeParserServiceTest --target-org <alias> --wait 10
+```
+
+It inserts real Contacts, so it needs the `Talent` record type and every custom
+field the mapper writes to exist in the org. If a field API name differs, the
+compile error will point straight at it.
 
 ## For true bulk (thousands of resumes)
 
