@@ -1,17 +1,26 @@
 # Salesforce side
 
-`ResumeParserService.cls` is the whole integration in one class — paste it into a
-single Apex Class in Setup. The two Queueables are inner classes, so there is
-nothing else to create. The old `ResumeParserQueueable` class is no longer
-referenced and can be deleted.
+**`ResumeParserService.cls`** is the entire integration in one class. Paste it
+into a single Apex Class in Setup. The two Queueables are inner classes, so
+there is nothing else to create.
 
-| File | Needed? |
+Delete the old `ResumeParserQueueable` class — nothing references it any more.
+
+## Before you save it
+
+| Line | Change |
 |---|---|
-| `ResumeParserService.cls` | **Yes** — the integration |
-| `ResumeParserServiceTest.cls` | **Yes** — Salesforce requires 75% coverage to deploy |
-| `ResumeParserCallback.cls` | Optional — lets the parser push results instead of being polled |
+| 53 | `BASE_URL` — the live Railway domain |
+| 54 | `API_KEY` — your parser API key |
 
-## The two bugs this fixes
+Confirm `BASE_URL` matches the **current** Railway domain. The
+`404 — "The train has not arrived at the station"` is Railway's edge saying no
+service serves that hostname; the request never reaches the parser.
+
+Nothing changes in the LWC — `startParsing(fileName, base64Data)` and
+`getLatestLogs(resumeNames)` keep their signatures and behaviour.
+
+## What this fixes
 
 ### 1. Wrong endpoint — why MaritalStatus and Gender were always blank
 
@@ -27,21 +36,15 @@ The two modes emit different field names:
 | `Gender` | `Gender` | `Gender__c` | worked |
 | `PhoneNumber` | `PhoneNumber` | `PhoneNumber__c` | worked |
 
-`ClientResumeData` is a 1:1 match for these Contact fields — `Nationality__c`,
-`Date_of_Birth__c`, `Years_of_Experience__c`, `Current_Location__c`,
-`CurrentDesignation__c`, `PhoneNumber__c`, `SCSCHAMPS__PhoneNumber__c`,
-`CurrentCompany__c`, `Type_1__c`, `Spoken_Language__c`, `MaritalStatus__c`,
-`Gender__c`, `Graduation_Year2__c`, `Institution_College__c`, `Name__c`,
-`Year__c`. It was built for this org. The class now calls
-`/api/v1/parse/client/jobs/base64` and uses those names, so every field lands.
+`ClientResumeData` is a 1:1 match for these Contact fields — it was built for
+this org. The class now calls `/api/v1/parse/client/jobs/base64` and uses those
+names, so every field lands.
 
 ### 2. The 504s
 
-The old `parseResume()` held one callout open for the entire parse.
-Salesforce caps a callout at 120s and the parser gave up at 110s — that is
-exactly where every 504 came from, and the whole batch was discarded with it.
-
-Now the flow is:
+The old `parseResume()` held one callout open for the entire parse. Salesforce
+caps a callout at 120s and the parser gave up at 110s — that is exactly where
+every 504 came from, and the whole batch was discarded with it.
 
 ```
 LWC ─► startParsing()
@@ -54,9 +57,9 @@ Each Queueable tick is its own transaction with a fresh 120s cumulative callout
 budget, so no amount of bulk can time it out. Ticks 0–1 fire immediately (a fast
 resume lands in seconds); after that it polls once a minute, up to 30 times.
 
-## Other fixes folded in
+### 3. Other fixes folded in
 
-- **Governor limits.** The `RecordType` SOQL and all DML were inside the results
+- **Governor limits.** The `RecordType` SOQL and all DML sat inside the results
   loop — one query and three DML statements *per resume*. The record type now
   comes from the describe cache (no SOQL at all) and inserts are bulkified.
 - **Debug SOQL removed.** Two `SELECT … WHERE Id = :con.Id` re-queries per row
@@ -67,28 +70,8 @@ resume lands in seconds); after that it polls once a minute, up to 30 times.
   tagged India whatever its length. Now parenthesised.
 - **Unreachable UAE branch.** The 9-digit UAE test sat after a `>= 9 && <= 10`
   Australia test, so it never ran. Reordered.
-- **Prefix matching** is now longest-first by construction rather than relying
-  on a lexicographic sort.
 - **No more hand-padded multipart.** `safeBase64Concat` and the boundary maths
   are gone; the body is `JSON.serialize()`.
-
-## Setup
-
-1. Set `BASE_URL` and `API_KEY` at the top of `ResumeParserService.cls`.
-   (Both are still constants, as before. Moving them to a Named Credential or
-   Custom Metadata is worth doing — an API key in source is readable by anyone
-   with access to the class.)
-2. Confirm `BASE_URL` matches the **current** Railway domain. The
-   `404 — "The train has not arrived at the station"` is Railway's edge saying
-   no service serves that hostname; the request never reaches the parser.
-3. Deploy:
-   ```bash
-   sf project deploy start --source-dir docs/salesforce --target-org <alias>
-   sf apex run test --class-names ResumeParserServiceTest --target-org <alias> --wait 10
-   ```
-
-Nothing changes in the LWC — `startParsing(fileName, base64Data)` and
-`getLatestLogs(resumeNames)` keep their signatures and behaviour.
 
 ## Two things to decide
 
@@ -98,16 +81,13 @@ behaviour is preserved; set `SKIP_WHEN_NO_EMAIL = true` to actually skip.
 
 **Queueable chain depth.** Polling chains one job per tick. Production and
 sandboxes have no chain-depth limit, but a **Developer Edition** org caps it at
-5 — there, lower `MAX_TICKS` or use the callback instead.
+5 — there, lower `MAX_TICKS`.
 
-## Optional: skip polling entirely
+## Deploying to production later
 
-Deploy `ResumeParserCallback.cls`, set its `EXPECTED_TOKEN`, and pass
-`callback_url` / `callback_token` when submitting. The parser POSTs the finished
-batch to your Apex REST resource once, and results apply the moment parsing
-finishes instead of on the next poll tick. Delivery is claimed atomically on the
-parser side, so a retried worker cannot double-deliver. Polling stays available
-as a fallback.
+Saving this class in a sandbox needs no test class. Deploying to **production**
+requires 75% Apex coverage, so a test class will be needed at that point — ask
+and it can be added back.
 
 ## For true bulk (thousands of resumes)
 
