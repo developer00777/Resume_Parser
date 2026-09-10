@@ -9,7 +9,12 @@ pydantic-settings==2.6.0
 python-dotenv==1.0.1
 reportlab==4.2.5
 
+# Redis job queue (async bulk parsing)
+arq==0.28.0
+redis[hiredis]==5.2.1
+
 # Testing
 pytest==8.3.4
 pytest-asyncio==0.24.0
 pytest-httpx==0.32.0
+fakeredis==2.26.2

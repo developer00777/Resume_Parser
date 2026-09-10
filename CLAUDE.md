@@ -2,11 +2,15 @@
 
 ## Project Overview
 
-FastAPI-based REST API that parses PDF/DOCX resume files and extracts structured data using a local Ollama LLM. Supports two output modes:
+FastAPI-based REST API that parses PDF/DOCX resume files and extracts structured data using an OpenRouter LLM. Supports two output modes:
 - **Web-app mode** — generic JSON response (`/api/v1/parse`)
 - **Salesforce mode** — SCSCHAMPS-mapped JSON, pulls resumes directly from Salesforce via OAuth2 (`/api/v1/salesforce/*`)
 
 Both modes are available simultaneously on the same running server.
+
+Each mode has a **synchronous** path (parse inside the request) and an **async
+queue** path (accept now, parse on a worker, poll or callback for results). Bulk
+loads belong on the queue — see `docs/QUEUE.md`.
 
 ## Tech Stack
 
@@ -16,8 +20,9 @@ Both modes are available simultaneously on the same running server.
 - **PDF Parsing:** PyPDF 5.1.0 (text-based); OCR fallback via gpt-4o-mini vision (image-based)
 - **DOCX Parsing:** python-docx 1.1.2
 - **HTTP Client:** httpx 0.27.2 (async)
+- **Job queue:** arq 0.28.0 + Redis 7 (async bulk parsing)
 - **Config:** Pydantic Settings + python-dotenv
-- **Containerization:** Docker + Docker Compose
+- **Containerization:** Docker + Docker Compose (app + worker + redis)
 - **Testing:** pytest + pytest-asyncio + pytest-httpx
 - **CI:** GitHub Actions
 
@@ -25,23 +30,31 @@ Both modes are available simultaneously on the same running server.
 
 ```
 app/
-├── main.py                  # FastAPI app entry, registers all routers
-├── config.py                # Pydantic Settings (Ollama + app + Salesforce creds)
+├── main.py                  # FastAPI app entry, registers all routers, opens Redis pool
+├── config.py                # Pydantic Settings (OpenRouter + app + Salesforce + queue)
+├── worker.py                # arq worker: parses ONE queued file per job
 ├── routes/
-│   ├── parser.py            # /api/v1/parse, /api/v1/models  (web-app endpoints)
+│   ├── parser.py            # /api/v1/parse, /api/v1/models  (sync web-app endpoints)
+│   ├── jobs.py              # /api/v1/parse/*/jobs           (async queue endpoints)
 │   └── salesforce.py        # /api/v1/salesforce/*           (Salesforce endpoints)
 ├── services/
 │   ├── document.py          # PDF/DOCX extraction; OCR fallback for image-based PDFs
 │   ├── llm.py               # OpenRouter integration, 3 consolidated prompts, score computation
+│   ├── queue.py             # Redis batch store + arq pool (owns every Redis key)
 │   └── salesforce.py        # OAuth2 token flow + resume file fetch from SF
 ├── schemas/response.py      # Pydantic models: ResumeData, SalesforceResumeData,
-│                            #   map_to_salesforce(), ParseResponse, etc.
+│                            #   map_to_generic/salesforce/client(), batch schemas
 └── middleware/auth.py        # X-API-Key middleware
 docker/
-├── Dockerfile               # Python 3.11-slim image
+├── Dockerfile               # Python 3.11-slim image (serves both app and worker)
 └── .dockerignore
+docs/
+├── API.md                   # Full endpoint reference
+└── QUEUE.md                 # Async queue: design, Railway deploy, Apex integration
 tests/
 ├── test_api.py              # Pytest suite (all external deps mocked)
+├── test_jobs.py             # Queue endpoints + sync partial-result behaviour
+├── test_queue.py            # Batch store + worker, against fakeredis
 ├── test_parse_resume.py     # Manual integration test script
 ├── generate_sample_pdf.py   # ReportLab sample PDF generator
 ├── sample_resume.txt        # Sample resume text
@@ -59,8 +72,11 @@ pytest.ini                   # Pytest config (asyncio_mode=auto)
 pip install -r requirements.txt
 uvicorn app.main:app --reload
 
-# Run unit tests (no live services needed — all mocked)
-pytest tests/test_api.py -v
+# Queue worker (needs Redis running; the API works without it, queue routes 503)
+arq app.worker.WorkerSettings
+
+# Run unit tests (no live services needed — all mocked, queue uses fakeredis)
+pytest tests/test_api.py tests/test_jobs.py tests/test_queue.py -v
 
 # Manual integration test (requires running services)
 python tests/test_parse_resume.py tests/sample_resume.pdf
@@ -69,9 +85,10 @@ python tests/test_parse_resume.py tests/sample_resume.pdf
 ### Docker
 
 ```bash
-docker-compose up --build
-docker-compose down
-docker-compose logs -f app
+docker compose up --build            # redis + app + worker
+docker compose up -d --scale worker=3
+docker compose logs -f worker
+docker compose down
 ```
 
 ## API Endpoints
@@ -80,9 +97,27 @@ docker-compose logs -f app
 
 | Method | Path | Auth | Description |
 |--------|------|------|-------------|
-| GET | `/health` | No | Health check + Ollama status |
-| POST | `/api/v1/parse` | X-API-Key | Upload PDF/DOCX → generic JSON |
-| GET | `/api/v1/models` | X-API-Key | List Ollama models |
+| GET | `/health` | No | Health check + OpenRouter and queue status |
+| POST | `/api/v1/parse` | X-API-Key | Upload 1–15 PDF/DOCX → generic JSON |
+| POST | `/api/v1/parse/salesforce` | X-API-Key | Upload 1–15 → SCSCHAMPS JSON |
+| POST | `/api/v1/parse/client` | X-API-Key | Upload 1–15 → client-1 JSON |
+| GET | `/api/v1/models` | X-API-Key | Currently configured model |
+
+Sync endpoints return **200 with partial results** if the batch outruns
+`BULK_TIMEOUT` — unfinished files come back as failed items. They no longer 504.
+
+### Async queue (preferred for bulk) — see `docs/QUEUE.md`
+
+| Method | Path | Auth | Description |
+|--------|------|------|-------------|
+| POST | `/api/v1/parse/jobs` | X-API-Key | Queue → generic JSON, 202 + `batch_id` |
+| POST | `/api/v1/parse/salesforce/jobs` | X-API-Key | Queue → SCSCHAMPS JSON |
+| POST | `/api/v1/parse/client/jobs` | X-API-Key | Queue → client-1 JSON |
+| GET | `/api/v1/parse/jobs/{batch_id}` | X-API-Key | Status + results so far |
+| DELETE | `/api/v1/parse/jobs/{batch_id}` | X-API-Key | Drop a batch early |
+
+Deprecated: `POST /api/v1/parse/job` and `GET /api/v1/parse/job/{job_id}`
+(singular) hold state in one process's memory — use the plural `jobs` routes.
 
 ### Salesforce
 
@@ -107,6 +142,28 @@ All env vars — see `.env.example` for full list.
 | `API_KEY` | `changeme` | X-API-Key value |
 | `MAX_FILE_SIZE` | `10485760` | Upload limit (bytes) |
 | `LOG_LEVEL` | `INFO` | Logging level |
+
+### Queue (async bulk path)
+
+| Variable | Default | Description |
+|---|---|---|
+| `REDIS_URL` | `redis://localhost:6379/0` | Railway's Redis plugin injects this |
+| `QUEUE_NAME` | `resume_parse` | Must match between app and worker |
+| `QUEUE_MAX_FILES` | `100` | Cap per async batch |
+| `WORKER_CONCURRENCY` | `8` | Resumes in flight per worker process |
+| `JOB_TIMEOUT` | `300` | Per-file budget inside the worker (s) |
+| `JOB_MAX_TRIES` | `3` | Attempts per file (transient errors only) |
+| `JOB_TTL` | `86400` | Lifetime of bytes and results in Redis (s) |
+| `JOB_STALE_SECONDS` | `1800` | Abandoned batch reaped after this |
+| `JOB_CALLBACK_ALLOWED_HOSTS` | *(empty = any)* | Comma-separated host suffixes |
+
+### Synchronous bulk
+
+| Variable | Default | Description |
+|---|---|---|
+| `BULK_MAX_FILES` | `15` | Files per synchronous request |
+| `BULK_TIMEOUT` | `110` | Wall-clock budget — keep under Salesforce's 120s callout cap |
+| `BULK_CONCURRENCY` | `5` | Files parsed in parallel per request |
 
 ### Salesforce (required for SF endpoints)
 
@@ -141,7 +198,15 @@ Pipeline: `lint → test → docker-build`
 ## Key Architecture Patterns
 
 - **Dual-mode output:** Same parsing pipeline; `map_to_salesforce()` converts the result for SF
-- **Stateless:** Files processed in memory, nothing persisted to disk
+- **Sync vs. queue:** The HTTP request either parses inline (bounded by
+  `BULK_TIMEOUT`, degrades to partial results) or only *accepts* work and hands it
+  to Redis. Salesforce caps a callout at 120s, so no synchronous budget can ever
+  fit a large batch — that is why the queue exists.
+- **One queued job per file, not per batch:** the unit of retry, timeout and
+  failure is a single resume, so one bad PDF cannot sink the other fourteen.
+  Results are written to Redis as each file lands and stream back to pollers.
+- **Stateless:** Files processed in memory; only the queue persists bytes, and
+  only until that file is parsed
 - **Async throughout:** httpx async client reused across Ollama calls
 - **Graceful degradation:** Empty fields returned on LLM extraction failure (no crash)
 - **Auth middleware:** `X-API-Key` on all `/api/v1/*`; public: `/health`, `/docs`, `/redoc`

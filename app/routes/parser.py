@@ -1,138 +1,48 @@
 import asyncio
+import logging
 import time
 import uuid
-import logging
-from typing import List
+from collections.abc import Awaitable, Callable
 
-from fastapi import APIRouter, UploadFile, File, HTTPException
+from fastapi import APIRouter, File, HTTPException, UploadFile
 
 from app.config import settings
+from app.schemas.response import (
+    BulkClientParseItem,
+    BulkClientParseResponse,
+    BulkJobStatus,
+    BulkParseItem,
+    BulkParseResponse,
+    BulkSalesforceParseItem,
+    BulkSalesforceParseResponse,
+    ModelInfo,
+    ModelsResponse,
+    map_to_client,
+    map_to_generic,
+    map_to_salesforce,
+)
 from app.services.document import extract_text
 from app.services.llm import parse_resume
-from app.schemas.response import (
-    ResumeData,
-    ClientResumeData,
-    ClientParseResponse,
-    BulkParseResponse,
-    BulkParseItem,
-    BulkClientParseResponse,
-    BulkClientParseItem,
-    BulkJobStatus,
-    BulkSalesforceParseResponse,
-    BulkSalesforceParseItem,
-    SalesforceResumeData,
-    ModelsResponse,
-    ModelInfo,
-    map_to_salesforce,
-    map_to_client,
-    _country_from_phone,
-)
 
 logger = logging.getLogger(__name__)
 
+# Historical name kept so nothing that imports it breaks; the mapper itself now
+# lives in schemas/response.py so the queue worker can share it.
+_to_resume_data = map_to_generic
 
-def _to_resume_data(parsed: dict, resume_text: str | None = None) -> ResumeData:
-    """Convert the parsed dict (with lists) into a flat ResumeData (with strings)."""
-    # Flatten list fields to pipe-delimited strings for the web-app response
-    skills = parsed.get("skills", [])
-    primary_skills = parsed.get("primary_skills", [])
-    technical_skills = parsed.get("technical_skills", [])
-    general_skills = parsed.get("general_skills", [])
-    experience = parsed.get("experience", [])
-    education = parsed.get("education", [])
-    projects = parsed.get("projects", [])
-    certifications = parsed.get("certifications", [])
-    awards = parsed.get("awards", [])
-    score = parsed.get("resume_score", {})
-
-    return ResumeData(
-        first_name=parsed.get("first_name"),
-        last_name=parsed.get("last_name"),
-        name=parsed.get("name"),
-        email=parsed.get("email"),
-        alternate_email=parsed.get("alternate_email"),
-        phone=parsed.get("phone"),
-        number=parsed.get("number"),
-        current_location=parsed.get("current_location"),
-        country=_country_from_phone(parsed.get("phone") or parsed.get("number")),
-        linkedin_url=parsed.get("linkedin_url"),
-        web_address=parsed.get("web_address"),
-        date_of_birth=parsed.get("date_of_birth"),
-        gender=parsed.get("gender"),
-        nationality=parsed.get("nationality"),
-        father_name=parsed.get("father_name"),
-        mother_name=parsed.get("mother_name"),
-        aadhar_number=parsed.get("aadhar_number"),
-        pan_number=parsed.get("pan_number"),
-        passport_number=parsed.get("passport_number"),
-        blood_group=parsed.get("blood_group"),
-        languages_known=parsed.get("languages_known"),
-        marital_status=parsed.get("marital_status"),
-        skills=", ".join(skills) if skills else None,
-        primary_skills=", ".join(primary_skills) if primary_skills else None,
-        technical_skills=", ".join(technical_skills) if technical_skills else None,
-        general_skills=", ".join(general_skills) if general_skills else None,
-        experience="\n".join(
-            f"{e.get('company','')} | {e.get('title','')} | {e.get('duration','')} | {e.get('description','')}"
-            for e in experience
-        ) if experience else None,
-        total_years_of_experience=parsed.get("total_years_of_experience"),
-        number_of_companies=parsed.get("number_of_companies"),
-        current_company=parsed.get("current_company"),
-        current_designation=parsed.get("current_designation"),
-        current_ctc=parsed.get("current_ctc"),
-        expected_ctc=parsed.get("expected_ctc"),
-        notice_period=parsed.get("notice_period"),
-        current_employment_status=parsed.get("current_employment_status"),
-        industry=parsed.get("industry"),
-        preferred_location=parsed.get("preferred_location"),
-        education="\n".join(
-            f"{e.get('institution','')} | {e.get('degree','')} | {e.get('field_of_study','')} | {e.get('end_year','')} | {e.get('grade','')}"
-            for e in education
-        ) if education else None,
-        highest_degree=parsed.get("highest_degree"),
-        qualification_1=parsed.get("qualification_1"),
-        qualification_1_type=parsed.get("qualification_1_type"),
-        institute_1=parsed.get("institute_1"),
-        qualification_2=parsed.get("qualification_2"),
-        qualification_2_type=parsed.get("qualification_2_type"),
-        institute_2=parsed.get("institute_2"),
-        education_detail=parsed.get("education_detail"),
-        projects="\n".join(
-            f"{p.get('name','')} | {p.get('duration','')} | {p.get('description','')}"
-            for p in projects
-        ) if projects else None,
-        certifications="\n".join(
-            f"{c.get('name','')} | {c.get('issuer','')}"
-            for c in certifications
-        ) if certifications else None,
-        awards="\n".join(
-            f"{a.get('name','')} | {a.get('year','')}"
-            for a in awards
-        ) if awards else None,
-        summary=parsed.get("summary"),
-        overall_score=score.get("overall") if isinstance(score, dict) else None,
-        grade=score.get("grade") if isinstance(score, dict) else None,
-        resume_text=resume_text,
-    )
 router = APIRouter(prefix="/api/v1", tags=["parser"])
 
-_BULK_MAX_FILES = 15
-# Wall-clock budget for synchronous bulk requests (seconds).
-_BULK_TIMEOUT = 110.0
-# Max parallel LLM calls — prevents OpenRouter rate-limit errors on large batches.
-_BULK_CONCURRENCY = 5
 
-# In-memory job store: job_id -> BulkJobStatus
-# Suitable for single-instance deployments (Railway, Render, etc.).
-_jobs: dict[str, BulkJobStatus] = {}
+def _async_hint(mode: str) -> str:
+    suffix = "" if mode == "generic" else f"/{mode}"
+    return f"POST /api/v1/parse{suffix}/jobs"
 
 
-@router.get("/models", response_model=ModelsResponse)
-async def get_models():
-    """Return the currently configured OpenRouter model."""
-    return ModelsResponse(
-        models=[ModelInfo(name=settings.openrouter_model)]
+def _budget_error(mode: str) -> str:
+    return (
+        f"Timed out after {settings.bulk_timeout:.0f}s — this batch needs longer than a "
+        f"synchronous request can wait. Submit it to the queue instead ({_async_hint(mode)}) "
+        f"and poll GET /api/v1/parse/jobs/{{batch_id}}."
     )
 
 
@@ -150,7 +60,7 @@ async def _parse_one(file: UploadFile, semaphore: asyncio.Semaphore) -> BulkPars
         return BulkParseItem(
             filename=filename,
             success=True,
-            data=_to_resume_data(parsed, resume_text=text),
+            data=map_to_generic(parsed, resume_text=text),
             processing_time_ms=elapsed_ms,
         )
     except Exception as exc:
@@ -221,18 +131,67 @@ async def _parse_one_client(file: UploadFile, semaphore: asyncio.Semaphore) -> B
 def _validate_files(files: list[UploadFile]) -> None:
     if not files:
         raise HTTPException(status_code=400, detail="No files provided.")
-    if len(files) > _BULK_MAX_FILES:
+    if len(files) > settings.bulk_max_files:
         raise HTTPException(
             status_code=400,
-            detail=f"Too many files. Maximum allowed per request is {_BULK_MAX_FILES}.",
+            detail=f"Too many files. Maximum allowed per request is {settings.bulk_max_files}.",
         )
+
+
+async def _gather_within_budget(
+    coroutines: list[Awaitable],
+    files: list[UploadFile],
+    on_unfinished: Callable[[str, str], object],
+    mode: str,
+) -> list:
+    """
+    Run every parse task and return whatever finished inside the wall-clock budget.
+
+    A synchronous caller (Salesforce caps a callout at 120s) used to get a blanket
+    504 the moment the batch ran long, throwing away every resume that had already
+    parsed. Now the finished ones come back intact and only the unfinished files
+    are marked failed, each carrying a pointer to the async queue endpoint.
+    """
+    tasks = [asyncio.ensure_future(coro) for coro in coroutines]
+    done, pending = await asyncio.wait(tasks, timeout=settings.bulk_timeout)
+
+    for task in pending:
+        task.cancel()
+    if pending:
+        await asyncio.gather(*pending, return_exceptions=True)
+        logger.warning(
+            "Sync %s batch hit the %.0fs budget — returning %d/%d parsed; "
+            "the caller should move this workload to the queue.",
+            mode, settings.bulk_timeout, len(done), len(tasks),
+        )
+
+    results = []
+    for task, file in zip(tasks, files):
+        filename = file.filename or "unknown"
+        if task in done and not task.cancelled():
+            exc = task.exception()
+            if exc is None:
+                results.append(task.result())
+                continue
+            results.append(on_unfinished(filename, f"{type(exc).__name__}: {exc}"))
+        else:
+            results.append(on_unfinished(filename, _budget_error(mode)))
+    return results
+
+
+@router.get("/models", response_model=ModelsResponse)
+async def get_models():
+    """Return the currently configured OpenRouter model."""
+    return ModelsResponse(
+        models=[ModelInfo(name=settings.openrouter_model)]
+    )
 
 
 # ── Single unified parse endpoint (1–15 files) ───────────────────────────────
 
 @router.post("/parse", response_model=BulkParseResponse)
 async def parse(
-    files: List[UploadFile] = File(..., description="1 to 15 resume files (PDF or DOCX)"),
+    files: list[UploadFile] = File(..., description="1 to 15 resume files (PDF or DOCX)"),
 ):
     """
     Parse 1 to 15 resume files in a single request.
@@ -240,21 +199,21 @@ async def parse(
     Send one file for a single resume or up to 15 files for bulk parsing.
     All files are processed concurrently (max 5 at a time).
     Each result is under `results[]` with filename, success flag, and parsed data.
+
+    If the batch outruns the synchronous budget the request still returns 200 with
+    the resumes that finished; the rest are reported as failed items. For reliable
+    bulk parsing use POST /api/v1/parse/jobs instead.
     """
     _validate_files(files)
     wall_start = time.time()
-    semaphore = asyncio.Semaphore(_BULK_CONCURRENCY)
+    semaphore = asyncio.Semaphore(settings.bulk_concurrency)
 
-    try:
-        results: list[BulkParseItem] = await asyncio.wait_for(
-            asyncio.gather(*[_parse_one(f, semaphore) for f in files]),
-            timeout=_BULK_TIMEOUT,
-        )
-    except asyncio.TimeoutError:
-        raise HTTPException(
-            status_code=504,
-            detail=f"Parsing exceeded the {_BULK_TIMEOUT}s time limit. Try fewer or smaller files.",
-        )
+    results: list[BulkParseItem] = await _gather_within_budget(
+        [_parse_one(f, semaphore) for f in files],
+        files,
+        lambda filename, error: BulkParseItem(filename=filename, success=False, error=error),
+        "generic",
+    )
 
     total_ms = round((time.time() - wall_start) * 1000, 2)
     parsed_count = sum(1 for r in results if r.success)
@@ -271,28 +230,27 @@ async def parse(
 
 @router.post("/parse/salesforce", response_model=BulkSalesforceParseResponse)
 async def parse_salesforce(
-    files: List[UploadFile] = File(..., description="Up to 15 resume files (PDF or DOCX)"),
+    files: list[UploadFile] = File(..., description="Up to 15 resume files (PDF or DOCX)"),
 ):
     """
     Parse up to 15 resume files and return SCSCHAMPS-mapped Salesforce JSON for each.
 
-    Same concurrency and timeout rules as /parse-bulk.
-    Use this endpoint when feeding results directly into Salesforce SCSCHAMPS fields.
+    Partial results are returned when the batch outruns the synchronous budget, so
+    this endpoint no longer answers 504. For bulk loads, submit to
+    POST /api/v1/parse/salesforce/jobs and poll — the queue has no wall clock.
     """
     _validate_files(files)
     wall_start = time.time()
-    semaphore = asyncio.Semaphore(_BULK_CONCURRENCY)
+    semaphore = asyncio.Semaphore(settings.bulk_concurrency)
 
-    try:
-        results: list[BulkSalesforceParseItem] = await asyncio.wait_for(
-            asyncio.gather(*[_parse_one_sf(f, semaphore) for f in files]),
-            timeout=_BULK_TIMEOUT,
-        )
-    except asyncio.TimeoutError:
-        raise HTTPException(
-            status_code=504,
-            detail=f"Parsing exceeded the {_BULK_TIMEOUT}s time limit. Try fewer or smaller files.",
-        )
+    results: list[BulkSalesforceParseItem] = await _gather_within_budget(
+        [_parse_one_sf(f, semaphore) for f in files],
+        files,
+        lambda filename, error: BulkSalesforceParseItem(
+            filename=filename, success=False, error=error
+        ),
+        "salesforce",
+    )
 
     total_ms = round((time.time() - wall_start) * 1000, 2)
     parsed_count = sum(1 for r in results if r.success)
@@ -309,7 +267,7 @@ async def parse_salesforce(
 
 @router.post("/parse/client", response_model=BulkClientParseResponse)
 async def parse_client(
-    files: List[UploadFile] = File(..., description="1 to 15 resume files (PDF or DOCX)"),
+    files: list[UploadFile] = File(..., description="1 to 15 resume files (PDF or DOCX)"),
 ):
     """
     Parse 1 to 15 resume files and return client-1 mapped JSON for each.
@@ -322,18 +280,16 @@ async def parse_client(
     """
     _validate_files(files)
     wall_start = time.time()
-    semaphore = asyncio.Semaphore(_BULK_CONCURRENCY)
+    semaphore = asyncio.Semaphore(settings.bulk_concurrency)
 
-    try:
-        results: list[BulkClientParseItem] = await asyncio.wait_for(
-            asyncio.gather(*[_parse_one_client(f, semaphore) for f in files]),
-            timeout=_BULK_TIMEOUT,
-        )
-    except asyncio.TimeoutError:
-        raise HTTPException(
-            status_code=504,
-            detail=f"Parsing exceeded the {_BULK_TIMEOUT}s time limit. Try fewer or smaller files.",
-        )
+    results: list[BulkClientParseItem] = await _gather_within_budget(
+        [_parse_one_client(f, semaphore) for f in files],
+        files,
+        lambda filename, error: BulkClientParseItem(
+            filename=filename, success=False, error=error
+        ),
+        "client",
+    )
 
     total_ms = round((time.time() - wall_start) * 1000, 2)
     parsed_count = sum(1 for r in results if r.success)
@@ -348,12 +304,18 @@ async def parse_client(
     )
 
 
-# ── Async job endpoints ───────────────────────────────────────────────────────
+# ── Legacy in-process job endpoints ──────────────────────────────────────────
+# Superseded by the Redis-backed queue (POST /api/v1/parse/jobs). These keep
+# state in this process only: results are lost on restart and invisible to other
+# replicas. Kept for backward compatibility — prefer the queue for new work.
+
+_jobs: dict[str, BulkJobStatus] = {}
+
 
 async def _run_bulk_job(job_id: str, file_bytes: list[tuple[str, bytes, str]]) -> None:
     """Background task: parse all files and store results in _jobs."""
     job = _jobs[job_id]
-    semaphore = asyncio.Semaphore(_BULK_CONCURRENCY)
+    semaphore = asyncio.Semaphore(settings.bulk_concurrency)
     wall_start = time.time()
 
     async def _parse_bytes(filename: str, content: bytes, content_type: str) -> BulkParseItem:
@@ -366,7 +328,7 @@ async def _run_bulk_job(job_id: str, file_bytes: list[tuple[str, bytes, str]]) -
             elapsed_ms = round((time.time() - start) * 1000, 2)
             return BulkParseItem(
                 filename=filename, success=True,
-                data=_to_resume_data(parsed, resume_text=text), processing_time_ms=elapsed_ms,
+                data=map_to_generic(parsed, resume_text=text), processing_time_ms=elapsed_ms,
             )
         except Exception as exc:
             elapsed_ms = round((time.time() - start) * 1000, 2)
@@ -397,16 +359,15 @@ async def _run_bulk_job(job_id: str, file_bytes: list[tuple[str, bytes, str]]) -
         job.error = str(exc)
 
 
-@router.post("/parse/job", response_model=BulkJobStatus, status_code=202)
+@router.post("/parse/job", response_model=BulkJobStatus, status_code=202, deprecated=True)
 async def submit_bulk_job(
-    files: List[UploadFile] = File(..., description="1 to 15 resume files (PDF or DOCX)"),
+    files: list[UploadFile] = File(..., description="1 to 15 resume files (PDF or DOCX)"),
 ):
     """
-    Submit a parse job and get back a job_id immediately (HTTP 202).
+    Deprecated — use POST /api/v1/parse/jobs (Redis-backed) instead.
 
-    Poll GET /api/v1/parse/job/{job_id} to check status.
-    Use this when you can't wait for a synchronous response (e.g. Salesforce
-    async callouts with a 120-second limit but many large files).
+    Submits a parse job held in this process's memory and returns a job_id (202).
+    The job dies with the process and is invisible to other replicas.
     """
     _validate_files(files)
 
@@ -427,10 +388,10 @@ async def submit_bulk_job(
     return job
 
 
-@router.get("/parse/job/{job_id}", response_model=BulkJobStatus)
+@router.get("/parse/job/{job_id}", response_model=BulkJobStatus, deprecated=True)
 async def get_bulk_job(job_id: str):
     """
-    Poll the status of a bulk parse job.
+    Deprecated — use GET /api/v1/parse/jobs/{batch_id} instead.
 
     - status=processing  — still running, poll again
     - status=completed   — result is populated

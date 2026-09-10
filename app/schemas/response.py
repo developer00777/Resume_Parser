@@ -343,6 +343,8 @@ class HealthResponse(BaseModel):
     status: str
     openrouter_connected: bool
     model: str
+    # Present once the Redis queue is configured; None when the queue is disabled.
+    queue: Optional["QueueHealth"] = None
 
 
 class ModelInfo(BaseModel):
@@ -724,3 +726,200 @@ def map_to_salesforce(parsed: dict, raw_text: str | None = None) -> SalesforceRe
         Resume_Score=float(score_obj.overall),
         resume_score=score_obj,
     )
+
+
+def map_to_generic(parsed: dict, resume_text: str | None = None) -> ResumeData:
+    """
+    Map the internal parsed dict to the flat generic web-app schema.
+
+    Lives here beside map_to_salesforce/map_to_client so the HTTP routes and the
+    queue worker share one mapper instead of each owning a copy.
+    """
+    skills = parsed.get("skills", [])
+    primary_skills = parsed.get("primary_skills", [])
+    technical_skills = parsed.get("technical_skills", [])
+    general_skills = parsed.get("general_skills", [])
+    experience = parsed.get("experience", [])
+    education = parsed.get("education", [])
+    projects = parsed.get("projects", [])
+    certifications = parsed.get("certifications", [])
+    awards = parsed.get("awards", [])
+    score = parsed.get("resume_score", {})
+
+    return ResumeData(
+        first_name=parsed.get("first_name"),
+        last_name=parsed.get("last_name"),
+        name=parsed.get("name"),
+        email=parsed.get("email"),
+        alternate_email=parsed.get("alternate_email"),
+        phone=parsed.get("phone"),
+        number=parsed.get("number"),
+        current_location=parsed.get("current_location"),
+        country=_country_from_phone(parsed.get("phone") or parsed.get("number")),
+        linkedin_url=parsed.get("linkedin_url"),
+        web_address=parsed.get("web_address"),
+        date_of_birth=parsed.get("date_of_birth"),
+        gender=parsed.get("gender"),
+        nationality=parsed.get("nationality"),
+        father_name=parsed.get("father_name"),
+        mother_name=parsed.get("mother_name"),
+        aadhar_number=parsed.get("aadhar_number"),
+        pan_number=parsed.get("pan_number"),
+        passport_number=parsed.get("passport_number"),
+        blood_group=parsed.get("blood_group"),
+        languages_known=parsed.get("languages_known"),
+        marital_status=parsed.get("marital_status"),
+        skills=", ".join(skills) if skills else None,
+        primary_skills=", ".join(primary_skills) if primary_skills else None,
+        technical_skills=", ".join(technical_skills) if technical_skills else None,
+        general_skills=", ".join(general_skills) if general_skills else None,
+        experience="\n".join(
+            f"{e.get('company','')} | {e.get('title','')} | {e.get('duration','')} | {e.get('description','')}"
+            for e in experience
+        ) if experience else None,
+        total_years_of_experience=parsed.get("total_years_of_experience"),
+        number_of_companies=parsed.get("number_of_companies"),
+        current_company=parsed.get("current_company"),
+        current_designation=parsed.get("current_designation"),
+        current_ctc=parsed.get("current_ctc"),
+        expected_ctc=parsed.get("expected_ctc"),
+        notice_period=parsed.get("notice_period"),
+        current_employment_status=parsed.get("current_employment_status"),
+        industry=parsed.get("industry"),
+        preferred_location=parsed.get("preferred_location"),
+        education="\n".join(
+            f"{e.get('institution','')} | {e.get('degree','')} | {e.get('field_of_study','')} | {e.get('end_year','')} | {e.get('grade','')}"
+            for e in education
+        ) if education else None,
+        highest_degree=parsed.get("highest_degree"),
+        qualification_1=parsed.get("qualification_1"),
+        qualification_1_type=parsed.get("qualification_1_type"),
+        institute_1=parsed.get("institute_1"),
+        qualification_2=parsed.get("qualification_2"),
+        qualification_2_type=parsed.get("qualification_2_type"),
+        institute_2=parsed.get("institute_2"),
+        education_detail=parsed.get("education_detail"),
+        projects="\n".join(
+            f"{p.get('name','')} | {p.get('duration','')} | {p.get('description','')}"
+            for p in projects
+        ) if projects else None,
+        certifications="\n".join(
+            f"{c.get('name','')} | {c.get('issuer','')}"
+            for c in certifications
+        ) if certifications else None,
+        awards="\n".join(
+            f"{a.get('name','')} | {a.get('year','')}"
+            for a in awards
+        ) if awards else None,
+        summary=parsed.get("summary"),
+        overall_score=score.get("overall") if isinstance(score, dict) else None,
+        grade=score.get("grade") if isinstance(score, dict) else None,
+        resume_text=resume_text,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Redis-queue batch schemas (async bulk path)
+# ---------------------------------------------------------------------------
+
+class BatchResultItem(BaseModel):
+    """One file's outcome inside a queued batch."""
+    index: int
+    filename: str
+    # Echoed back untouched from the submit request so the caller can tie this
+    # result to its own record without relying on filename or ordering.
+    external_id: Optional[str] = None
+    success: bool
+    # Shape follows the batch's mode: ResumeData (generic),
+    # SalesforceResumeData (salesforce) or ClientResumeData (client).
+    data: Optional[dict] = None
+    error: Optional[str] = None
+    processing_time_ms: float = 0.0
+
+
+class BatchSubmitResponse(BaseModel):
+    """202 response returned the moment a batch is accepted onto the queue."""
+    batch_id: str
+    status: str = "queued"
+    mode: str
+    total: int
+    poll_url: str
+    callback_url: Optional[str] = None
+
+
+class BatchStatusResponse(BaseModel):
+    """Full state of a queued batch, including results finished so far."""
+    batch_id: str
+    # queued | processing | completed | expired
+    status: str
+    mode: str
+    total: int
+    completed: int
+    parsed: int
+    failed: int
+    remaining: int
+    running: int
+    created_at: float
+    updated_at: float
+    finished_at: Optional[float] = None
+    total_processing_time_ms: float = 0.0
+    results: list[BatchResultItem] = Field(default_factory=list)
+
+
+class QueueHealth(BaseModel):
+    connected: bool
+    queued_jobs: Optional[int] = None
+    error: Optional[str] = None
+
+
+# ---------------------------------------------------------------------------
+# JSON (base64) submit request — the Apex-friendly alternative to multipart
+# ---------------------------------------------------------------------------
+
+class Base64File(BaseModel):
+    """One resume delivered as base64 inside a JSON body."""
+    filename: str = Field(..., description="Used to infer the type when content_type is absent")
+    content_base64: str = Field(..., description="Base64-encoded PDF or DOCX bytes")
+    content_type: Optional[str] = Field(
+        None, description="Optional; inferred from the filename extension when omitted"
+    )
+    external_id: Optional[str] = Field(
+        None, description="Your correlation key — echoed back on the result untouched"
+    )
+
+
+class Base64BatchRequest(BaseModel):
+    """
+    Queue submission as JSON rather than multipart/form-data.
+
+    Building a correct multipart body in Apex means hand-padding base64 to keep
+    boundaries byte-aligned, which is the single most bug-prone part of a
+    Salesforce integration. This shape needs only JSON.serialize().
+    """
+    files: list[Base64File] = Field(..., description="Resumes in this batch")
+    callback_url: Optional[str] = Field(None, description="POSTed the finished batch")
+    callback_token: Optional[str] = Field(None, description="Sent as 'Authorization: Bearer'")
+
+
+class RecordReference(BaseModel):
+    """A resume the parser should download from Salesforce itself."""
+    ref: str = Field(..., description="ContentVersion/Attachment Id, Candidate Id, or a URL")
+    kind: str = Field("attachment", description="attachment | candidate | url")
+    filename: Optional[str] = Field(None, description="Optional; Salesforce's own name wins")
+    external_id: Optional[str] = Field(
+        None, description="Your correlation key (e.g. the Candidate Id) — echoed back untouched"
+    )
+
+
+class RecordBatchRequest(BaseModel):
+    """
+    Queue submission by record id instead of by file bytes.
+
+    The payload is a few KB however large the resumes are, so it fits inside the
+    Apex heap ceiling (6 MB sync / 12 MB async) that makes bulk uploads from
+    Salesforce impossible. The worker downloads each file using the Connected
+    App credentials the SF endpoints already use.
+    """
+    records: list[RecordReference] = Field(..., description="Resumes in this batch")
+    callback_url: Optional[str] = Field(None, description="POSTed the finished batch")
+    callback_token: Optional[str] = Field(None, description="Sent as 'Authorization: Bearer'")

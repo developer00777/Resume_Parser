@@ -5,6 +5,14 @@
 > **Base URL (Docker):** `http://localhost:8000`
 > **Interactive docs:** `http://localhost:8000/docs` (Swagger UI) · `http://localhost:8000/redoc`
 
+> **Bulk parsing → [docs/QUEUE.md](QUEUE.md).** The synchronous endpoints below
+> parse inside the request, which cannot outlive Salesforce's 120-second callout
+> cap. They now return **200 with partial results** rather than 504 when a batch
+> runs long, but anything larger than a handful of resumes belongs on the Redis
+> queue: `POST /api/v1/parse/{,salesforce/,client/}jobs` returns a `batch_id` in
+> milliseconds, and `GET /api/v1/parse/jobs/{batch_id}` streams results back as
+> each resume finishes.
+
 ---
 
 ## Table of Contents

@@ -41,6 +41,8 @@ jobs:
       SF_CLIENT_SECRET: dummy_client_secret
       SF_LOGIN_URL: https://login.salesforce.com
       SF_API_VERSION: "59.0"
+      # Queue tests run against fakeredis — no Redis service needed in CI.
+      REDIS_URL: redis://localhost:6379/0
 
     steps:
       - uses: actions/checkout@v4
@@ -56,7 +58,7 @@ jobs:
 
       - name: Run pytest
         run: |
-          pytest tests/test_api.py -v \
+          pytest tests/test_api.py tests/test_jobs.py tests/test_queue.py -v \
             --tb=short \
             --junitxml=test-results/results.xml
 
