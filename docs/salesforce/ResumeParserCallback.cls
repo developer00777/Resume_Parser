@@ -36,7 +36,7 @@ global with sharing class ResumeParserCallback {
 
             List<Object> results = (List<Object>) batch.get('results');
             if (results != null && !results.isEmpty()) {
-                ResumeParserApply.applyResults(results);
+                ResumeParserService.applyResults(results, null, null);
             }
 
             res.statusCode = 200;

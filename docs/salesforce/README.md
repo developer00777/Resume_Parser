@@ -1,148 +1,123 @@
-# Salesforce side — bulk parsing that respects the governor limits
+# Salesforce side
 
-Reference Apex for driving the parser's async queue. Deploy it, adapt
-`ResumeParserApply` to your fields, and bulk parsing stops fighting the platform.
+`ResumeParserService.cls` is the whole integration in one class — paste it into a
+single Apex Class in Setup. The two Queueables are inner classes, so there is
+nothing else to create. The old `ResumeParserQueueable` class is no longer
+referenced and can be deleted.
 
-## Why "just make more callouts" does not work
-
-The 110s you were seeing was the parser's own budget (now removed — see
-[../QUEUE.md](../QUEUE.md)). But the Salesforce side has hard ceilings of its
-own, and two of them cannot be raised by any amount of chunking *within one
-transaction*:
-
-| Limit | Value | What it means here |
-|---|---|---|
-| **Cumulative callout time** | **120 s per transaction** | 15 sequential callouts at 20 s each die on the sixth — each one legal, the total not |
-| **Heap** | 6 MB sync / 12 MB async | A 2 MB PDF costs ~8 MB as Blob + base64 String + request body. One or two per transaction, ever |
-| Callouts per transaction | 100 | Rarely the binding constraint |
-| CPU time | 10 s sync / 60 s async | Base64-encoding large files eats this fast |
-
-So the fix is not *more* calls — it is **small, fast calls spread across
-transactions**. Two changes get you there:
-
-1. **Send record ids, not file bytes.** `POST /api/v1/parse/salesforce/jobs/records`
-   takes a list of ContentVersion / Attachment / Candidate ids. The payload is a
-   few KB no matter how large the resumes are, the callout returns in ~300 ms,
-   and the parser downloads each file server-side with the Connected App
-   credentials. Heap stops mattering entirely.
-2. **Put each chunk in its own transaction.** Batch Apex gives every `execute()`
-   a fresh 120 s callout budget and a fresh heap. Scale comes from the number of
-   chunks, not from stretching one request.
-
-Result: 5,000 resumes is 50 chunks × 1 callout × ~0.3 s. Nothing can time out.
-
-## The classes
-
-| Class | Role |
+| File | Needed? |
 |---|---|
-| `ResumeParserService` | Thin client — `submitRecords()` and `pollBatch()` |
-| `ResumeParserSubmitBatch` | Batch Apex over every unparsed Candidate; one callout per chunk |
-| `ResumeParserPoller` | Queueable that polls outstanding batches and chains itself |
-| `ResumeParserApply` | **Edit this** — writes results onto your Candidate fields |
-| `ResumeParserCallback` | Optional REST resource, so the parser pushes results and you never poll |
-| `ResumeParserServiceTest` | Callout-mocked coverage (Salesforce requires 75% to deploy) |
+| `ResumeParserService.cls` | **Yes** — the integration |
+| `ResumeParserServiceTest.cls` | **Yes** — Salesforce requires 75% coverage to deploy |
+| `ResumeParserCallback.cls` | Optional — lets the parser push results instead of being polled |
+
+## The two bugs this fixes
+
+### 1. Wrong endpoint — why MaritalStatus and Gender were always blank
+
+The old code called `/api/v1/parse/salesforce` but read **client-mode** keys.
+The two modes emit different field names:
+
+| Key the old code read | `salesforce` mode | `client` mode | Result |
+|---|---|---|---|
+| `MaritalStatus` | *absent* | `MaritalStatus__c` | always null |
+| `Nationality__c` | `Nationnality` | `Nationality__c` | always null |
+| `Spoken_Language__c` | *absent* | `Spoken_Language__c` | always null |
+| `CandidateType` | *absent* | `Type_1__c` | always null |
+| `Gender` | `Gender` | `Gender__c` | worked |
+| `PhoneNumber` | `PhoneNumber` | `PhoneNumber__c` | worked |
+
+`ClientResumeData` is a 1:1 match for these Contact fields — `Nationality__c`,
+`Date_of_Birth__c`, `Years_of_Experience__c`, `Current_Location__c`,
+`CurrentDesignation__c`, `PhoneNumber__c`, `SCSCHAMPS__PhoneNumber__c`,
+`CurrentCompany__c`, `Type_1__c`, `Spoken_Language__c`, `MaritalStatus__c`,
+`Gender__c`, `Graduation_Year2__c`, `Institution_College__c`, `Name__c`,
+`Year__c`. It was built for this org. The class now calls
+`/api/v1/parse/client/jobs/base64` and uses those names, so every field lands.
+
+### 2. The 504s
+
+The old `parseResume()` held one callout open for the entire parse.
+Salesforce caps a callout at 120s and the parser gave up at 110s — that is
+exactly where every 504 came from, and the whole batch was discarded with it.
+
+Now the flow is:
+
+```
+LWC ─► startParsing()
+         └─► SubmitJob    POST …/jobs/base64   → batch_id in ~15 ms
+               └─► PollJob   GET …/jobs/{id}   ← chains itself until complete
+                     └─► Contact + Resume_Parser_Log__c + Attachment
+```
+
+Each Queueable tick is its own transaction with a fresh 120s cumulative callout
+budget, so no amount of bulk can time it out. Ticks 0–1 fire immediately (a fast
+resume lands in seconds); after that it polls once a minute, up to 30 times.
+
+## Other fixes folded in
+
+- **Governor limits.** The `RecordType` SOQL and all DML were inside the results
+  loop — one query and three DML statements *per resume*. The record type now
+  comes from the describe cache (no SOQL at all) and inserts are bulkified.
+- **Debug SOQL removed.** Two `SELECT … WHERE Id = :con.Id` re-queries per row
+  existed only to print to the log.
+- **Country-code precedence bug.** `length == 10 && startsWith('6') ||
+  startsWith('7') || …` parses as `(length==10 && '6') || '7' || '8' || '9'`
+  because `&&` binds tighter than `||`, so *any* number starting 7/8/9 was
+  tagged India whatever its length. Now parenthesised.
+- **Unreachable UAE branch.** The 9-digit UAE test sat after a `>= 9 && <= 10`
+  Australia test, so it never ran. Reordered.
+- **Prefix matching** is now longest-first by construction rather than relying
+  on a lexicographic sort.
+- **No more hand-padded multipart.** `safeBase64Concat` and the boundary maths
+  are gone; the body is `JSON.serialize()`.
 
 ## Setup
 
-**1. Named Credential** — Setup → Named Credentials → New Legacy:
+1. Set `BASE_URL` and `API_KEY` at the top of `ResumeParserService.cls`.
+   (Both are still constants, as before. Moving them to a Named Credential or
+   Custom Metadata is worth doing — an API key in source is readable by anyone
+   with access to the class.)
+2. Confirm `BASE_URL` matches the **current** Railway domain. The
+   `404 — "The train has not arrived at the station"` is Railway's edge saying
+   no service serves that hostname; the request never reaches the parser.
+3. Deploy:
+   ```bash
+   sf project deploy start --source-dir docs/salesforce --target-org <alias>
+   sf apex run test --class-names ResumeParserServiceTest --target-org <alias> --wait 10
+   ```
 
-```
-Label:                Resume Parser
-Name:                 Resume_Parser
-URL:                  https://<your-railway-domain>
-Identity Type:        Named Principal
-Authentication:       Password Authentication
-Username:             resume-parser        (unused; any value)
-Password:             <your API_KEY>
-Generate Auth Header: unchecked
-```
+Nothing changes in the LWC — `startParsing(fileName, base64Data)` and
+`getLatestLogs(resumeNames)` keep their signatures and behaviour.
 
-The classes send the key as `X-API-Key: {!$Credential.Password}`, so the key
-never appears in source.
+## Two things to decide
 
-> Confirm the URL against the **current** Railway domain. The
-> `404 — "The train has not arrived at the station"` you were getting is
-> Railway's edge saying no service serves that hostname; the request never
-> reached the parser at all.
+**Missing-email records.** The old code logged *"Skipping record due to missing
+email"* but had no `continue`, so it inserted the Contact anyway. Current
+behaviour is preserved; set `SKIP_WHEN_NO_EMAIL = true` to actually skip.
 
-**2. Connected App on the parser** — the record-id path needs the parser able to
-download files from your org. Set `SF_CLIENT_ID` / `SF_CLIENT_SECRET` (and
-`SF_LOGIN_URL=https://test.salesforce.com` for a sandbox) on both the `app` and
-`worker` services. If you would rather not grant that, use the base64 path
-instead (below).
+**Queueable chain depth.** Polling chains one job per tick. Production and
+sandboxes have no chain-depth limit, but a **Developer Edition** org caps it at
+5 — there, lower `MAX_TICKS` or use the callback instead.
 
-**3. Custom fields** used by the reference `ResumeParserApply` — create these on
-`SCSCHAMPS__Candidate__c` or edit the class to match what you already have:
+## Optional: skip polling entirely
 
-| Field | Type |
-|---|---|
-| `Resume_Parsed__c` | Checkbox |
-| `Resume_Parse_Error__c` | Text(255) |
-| `Resume_Parsed_On__c` | Date/Time |
+Deploy `ResumeParserCallback.cls`, set its `EXPECTED_TOKEN`, and pass
+`callback_url` / `callback_token` when submitting. The parser POSTs the finished
+batch to your Apex REST resource once, and results apply the moment parsing
+finishes instead of on the next poll tick. Delivery is claimed atomically on the
+parser side, so a retried worker cannot double-deliver. Polling stays available
+as a fallback.
 
-**4. Deploy**
+## For true bulk (thousands of resumes)
 
-```bash
-sf project deploy start --source-dir docs/salesforce --target-org <alias>
-sf apex run test --class-names ResumeParserServiceTest --target-org <alias> --wait 10
-```
+The base64 path is heap-bound: a 2 MB PDF costs roughly 8 MB as Blob + base64
+String + request body, against a 6 MB sync / 12 MB async ceiling. That is fine
+for the LWC's one-file-at-a-time flow.
 
-## Running it
-
-```apex
-// Everything unparsed. Scope 100 == one parser batch == one callout per chunk.
-Database.executeBatch(new ResumeParserSubmitBatch(), 100);
-```
-
-Or a single ad-hoc batch with no Batch Apex:
-
-```apex
-List<ResumeParserService.RecordRef> refs = new List<ResumeParserService.RecordRef>();
-for (SCSCHAMPS__Candidate__c c : candidates) {
-    refs.add(new ResumeParserService.RecordRef(
-        c.SCSCHAMPS__Resume_Attachment_Id__c, 'attachment', c.Id   // c.Id → external_id
-    ));
-}
-String batchId = ResumeParserService.submitRecords(refs);
-System.enqueueJob(new ResumeParserPoller(new List<String>{ batchId }, 0), 1);
-```
-
-Skip polling altogether by passing a callback:
-
-```apex
-Database.executeBatch(new ResumeParserSubmitBatch(
-    'https://<your-domain>/services/apexrest/resumeCallback', 'your-shared-secret'
-), 100);
-```
-
-## Correlating results back to records
-
-Set `external_id` to the Candidate Id when submitting; the parser echoes it back
-on every result row, success or failure, including rows it reaps after a worker
-dies. **Do not match on filename** — duplicates collide, and the parser prefers
-Salesforce's own filename over whatever you sent.
-
-```json
-{"index": 0, "filename": "Jane_Doe_CV.pdf", "external_id": "a0X1000000CandId",
- "success": true, "data": { "FirstName": "Jane", "...": "..." }}
-```
-
-## If you cannot grant the parser file access
-
-Use the base64 path — same batch semantics, you send the bytes:
-
-```apex
-Blob body = [SELECT VersionData FROM ContentVersion WHERE Id = :cvId].VersionData;
-String payload = JSON.serialize(new Map<String, Object>{
-    'files' => new List<Object>{ new Map<String, Object>{
-        'filename'       => 'cv.pdf',
-        'content_base64' => EncodingUtil.base64Encode(body),
-        'external_id'    => candidateId
-    }}
-});
-// POST to /api/v1/parse/salesforce/jobs/base64
-```
-
-Plain JSON, so no hand-padded multipart boundaries. **Keep the chunk to 1–2
-files per transaction** — this path is heap-bound, which is exactly the ceiling
-the record-id path avoids.
+For large back-fills use `POST /api/v1/parse/client/jobs/records` instead — it
+takes ContentVersion / Attachment / Candidate **ids**, so the payload is a few KB
+however large the resumes are and the parser downloads each file itself. Drive it
+from Batch Apex with `scope = 100` (one chunk = one parser batch = one callout),
+and set `external_id` to the record you want updated. See
+[../QUEUE.md](../QUEUE.md).
