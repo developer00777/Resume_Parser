@@ -282,8 +282,9 @@ public with sharing class ResumeParserService {
                 Contact con = buildContact((Map<String, Object>) rawData, recordTypeId);
 
                 if (con == null) {
-                    failedLogs.add(buildLog(
-                        rowName, 'Failed', 'Skipped: no email address found.', null));
+                    failedLogs.add(buildLog(rowName, 'Failed',
+                        'Skipped: the parser returned no name and no email for this '
+                        + 'file, so there is nothing to create a Contact from.', null));
                     continue;
                 }
                 contacts.add(con);
@@ -346,6 +347,16 @@ public with sharing class ResumeParserService {
             fullName = str(d, 'FullName__c');
         }
 
+        String email = str(d, 'Email');
+
+        // Neither a name nor an email means extraction produced nothing usable
+        // (an empty LLM response, or OCR that read no text). Creating a nameless
+        // "Unknown" Contact just accumulates junk that has to be cleaned up —
+        // report the row as failed so the file can be retried instead.
+        if (String.isBlank(fullName) && String.isBlank(email)) {
+            return null;
+        }
+
         if (String.isNotBlank(fullName)) {
             List<String> parts = fullName.trim().split('\\s+');
             if (parts.size() > 1) {
@@ -359,11 +370,12 @@ public with sharing class ResumeParserService {
                 con.LastName = fullName;
             }
         } else {
+            // Has an email but no name — worth keeping; the email identifies them.
             con.LastName = 'Unknown';
         }
 
         // ===== EMAIL =====
-        con.Email = str(d, 'Email');
+        con.Email = email;
         if (SKIP_WHEN_NO_EMAIL && String.isBlank(con.Email)) {
             return null;
         }

@@ -64,6 +64,20 @@ def _error_text(exc: BaseException) -> str:
     return f"{type(exc).__name__}: {exc}" if str(exc) else type(exc).__name__
 
 
+def _is_usable(parsed: dict) -> bool:
+    """
+    True when extraction produced at least an identity to key a record on.
+
+    parse_resume() degrades gracefully — a failed chunk yields {} rather than
+    raising — so an all-empty result otherwise looks like a success.
+    """
+    return bool(
+        (parsed.get("name") or "").strip()
+        or (parsed.get("full_name") or "").strip()
+        or (parsed.get("email") or "").strip()
+    )
+
+
 def _content_type_for(filename: str) -> str:
     return (
         "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
@@ -134,6 +148,20 @@ async def parse_file(ctx: dict, batch_id: str, index: int) -> None:
             timeout=budget,
         )
         parsed = await asyncio.wait_for(parse_resume(text), timeout=budget)
+
+        # A result with neither a name nor an email is not a parsed resume — it
+        # means contact extraction returned nothing (an empty LLM response, or
+        # OCR that produced no usable text). Reporting success for it makes the
+        # caller create a nameless record; report the failure instead so the
+        # file can be retried.
+        if not _is_usable(parsed):
+            raise HTTPException(
+                status_code=422,
+                detail="Parsed no name or email from this file — the resume text "
+                       "could not be read. It may be a scanned image, empty, or "
+                       "password-protected.",
+            )
+
         item = {
             "index": index,
             "filename": filename,

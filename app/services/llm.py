@@ -345,6 +345,11 @@ _CHUNKS = [
 
 _FULL_TEXT_THRESHOLD = 8000
 
+# Attempts per chunk. The model intermittently returns an empty completion,
+# which would otherwise blank every field that chunk owns.
+_CHUNK_ATTEMPTS = 3
+_CHUNK_RETRY_BACKOFF = 1.0
+
 
 # ---------------------------------------------------------------------------
 # JSON parsing helpers (SRP: response → dict, no HTTP concerns)
@@ -571,19 +576,44 @@ class ResumeExtractor:
         self._client = client
 
     async def _call_chunk(self, chunk_name: str, prompt: str, max_tok: int, text: str) -> tuple[str, dict]:
-        try:
-            logger.info(f"Chunk '{chunk_name}': {len(text)} chars, max_tok={max_tok}, model={self._client.model}")
-            raw = await self._client.complete(
-                prompt + text,
-                max_tokens=max_tok,
-                response_format={"type": "json_object"},
-            )
-            data = _extract_json(raw)
-            logger.info(f"Chunk '{chunk_name}' extracted {len(data)} fields")
-            return chunk_name, data
-        except Exception as e:
-            logger.error(f"Chunk '{chunk_name}' failed: {e}")
-            return chunk_name, {}
+        """
+        Run one chunk, retrying when the model answers with nothing.
+
+        DeepSeek intermittently returns an empty completion — the symptom is
+        "Failed to parse chunk response:" with nothing after it. An empty dict
+        here silently blanks every field the chunk owns (chunk_a is name/email,
+        so the resume lands with no identity at all), and the caller still
+        reports success. A retry costs a second or two and recovers most of them.
+
+        A genuinely empty section still comes back as {"awards": []} and parses
+        to a non-empty dict, so "falsy dict" reliably means the call failed
+        rather than the resume lacking that section.
+        """
+        logger.info(f"Chunk '{chunk_name}': {len(text)} chars, max_tok={max_tok}, model={self._client.model}")
+
+        for attempt in range(1, _CHUNK_ATTEMPTS + 1):
+            try:
+                raw = await self._client.complete(
+                    prompt + text,
+                    max_tokens=max_tok,
+                    response_format={"type": "json_object"},
+                )
+                data = _extract_json(raw)
+                if data:
+                    logger.info(f"Chunk '{chunk_name}' extracted {len(data)} fields")
+                    return chunk_name, data
+                logger.warning(
+                    f"Chunk '{chunk_name}' returned an empty/unparseable response "
+                    f"(attempt {attempt}/{_CHUNK_ATTEMPTS})"
+                )
+            except Exception as e:
+                logger.error(f"Chunk '{chunk_name}' failed (attempt {attempt}/{_CHUNK_ATTEMPTS}): {e}")
+
+            if attempt < _CHUNK_ATTEMPTS:
+                await asyncio.sleep(_CHUNK_RETRY_BACKOFF * attempt)
+
+        logger.error(f"Chunk '{chunk_name}' gave up after {_CHUNK_ATTEMPTS} attempts")
+        return chunk_name, {}
 
     async def extract(self, text: str) -> dict:
         text = _normalise_text(text)

@@ -400,3 +400,150 @@ class TestWorkerResolve:
         assert batch["results"][0]["success"] is True
         assert batch["results"][0]["filename"] == "Jane.pdf"
         assert batch["results"][0]["data"]["Name"] == "Jane Doe"
+
+
+# ---------------------------------------------------------------------------
+# Unusable parses must fail loudly, not produce nameless records
+# ---------------------------------------------------------------------------
+
+class TestUnusableParse:
+    """
+    parse_resume() degrades gracefully — a failed chunk returns {} rather than
+    raising — so an all-empty result used to be reported as a success. Salesforce
+    then created a Contact with LastName 'Unknown' and no email.
+    """
+
+    async def test_no_name_and_no_email_is_reported_as_failed(self, pool):
+        from app import worker
+
+        batch_id, _ = await _make_batch(pool, mode="client", count=1)
+
+        with patch("app.worker.validate_file_bytes", new_callable=AsyncMock) as extract, \
+             patch("app.worker.parse_resume", new_callable=AsyncMock) as parse:
+            extract.return_value = "some unreadable text"
+            parse.return_value = {"name": None, "email": None, "skills": []}
+            await worker.parse_file({"redis": pool, "job_try": 1}, batch_id, 0)
+
+        batch = await queue.get_batch(pool, batch_id)
+        assert batch["status"] == "completed"
+        assert batch["results"][0]["success"] is False
+        assert batch["results"][0]["data"] is None
+        assert "no name or email" in batch["results"][0]["error"]
+
+    async def test_email_without_a_name_is_still_usable(self, pool):
+        from app import worker
+
+        batch_id, _ = await _make_batch(pool, mode="client", count=1)
+
+        with patch("app.worker.validate_file_bytes", new_callable=AsyncMock) as extract, \
+             patch("app.worker.parse_resume", new_callable=AsyncMock) as parse:
+            extract.return_value = "text"
+            parse.return_value = {"name": None, "email": "jane@example.com"}
+            await worker.parse_file({"redis": pool, "job_try": 1}, batch_id, 0)
+
+        batch = await queue.get_batch(pool, batch_id)
+        assert batch["results"][0]["success"] is True
+
+    async def test_name_without_an_email_is_still_usable(self, pool):
+        from app import worker
+
+        batch_id, _ = await _make_batch(pool, mode="client", count=1)
+
+        with patch("app.worker.validate_file_bytes", new_callable=AsyncMock) as extract, \
+             patch("app.worker.parse_resume", new_callable=AsyncMock) as parse:
+            extract.return_value = "text"
+            parse.return_value = {"name": "Jane Doe", "email": None}
+            await worker.parse_file({"redis": pool, "job_try": 1}, batch_id, 0)
+
+        batch = await queue.get_batch(pool, batch_id)
+        assert batch["results"][0]["success"] is True
+
+    @pytest.mark.parametrize(
+        "parsed,usable",
+        [
+            ({}, False),
+            ({"name": "", "email": "   "}, False),
+            ({"name": "   "}, False),
+            ({"full_name": "Jane Doe"}, True),
+            ({"email": "a@b.c"}, True),
+        ],
+    )
+    def test_usability_rule(self, parsed, usable):
+        from app import worker
+        assert worker._is_usable(parsed) is usable
+
+
+# ---------------------------------------------------------------------------
+# Empty LLM responses are retried
+# ---------------------------------------------------------------------------
+
+class TestChunkRetry:
+    """
+    The model intermittently returns an empty completion. Without a retry that
+    silently blanks every field the chunk owns — for chunk_a that is the name
+    and email, which is what produced the 'Unknown' contacts.
+    """
+
+    async def test_empty_response_is_retried_then_succeeds(self):
+        from app.services.llm import ResumeExtractor
+
+        client = AsyncMock()
+        # First call comes back empty, second returns real JSON.
+        client.complete.side_effect = ["", '{"contact": {"full_name": "Jane Doe"}}']
+        client.model = "test-model"
+
+        with patch("app.services.llm._CHUNK_RETRY_BACKOFF", 0):
+            name, data = await ResumeExtractor(client=client)._call_chunk(
+                "chunk_a", "prompt", 100, "resume text"
+            )
+
+        assert name == "chunk_a"
+        assert data == {"contact": {"full_name": "Jane Doe"}}
+        assert client.complete.await_count == 2
+
+    async def test_all_attempts_empty_gives_up_without_raising(self):
+        from app.services.llm import ResumeExtractor, _CHUNK_ATTEMPTS
+
+        client = AsyncMock()
+        client.complete.return_value = ""
+        client.model = "test-model"
+
+        with patch("app.services.llm._CHUNK_RETRY_BACKOFF", 0):
+            name, data = await ResumeExtractor(client=client)._call_chunk(
+                "chunk_b", "prompt", 100, "resume text"
+            )
+
+        assert (name, data) == ("chunk_b", {})
+        assert client.complete.await_count == _CHUNK_ATTEMPTS
+
+    async def test_exception_is_retried_too(self):
+        from app.services.llm import ResumeExtractor
+
+        client = AsyncMock()
+        client.complete.side_effect = [
+            RuntimeError("connection reset"),
+            '{"skills": {"all_skills": ["Python"]}}',
+        ]
+        client.model = "test-model"
+
+        with patch("app.services.llm._CHUNK_RETRY_BACKOFF", 0):
+            name, data = await ResumeExtractor(client=client)._call_chunk(
+                "chunk_b", "prompt", 100, "resume text"
+            )
+
+        assert data == {"skills": {"all_skills": ["Python"]}}
+        assert client.complete.await_count == 2
+
+    async def test_a_good_first_response_is_not_retried(self):
+        from app.services.llm import ResumeExtractor
+
+        client = AsyncMock()
+        client.complete.return_value = '{"contact": {"full_name": "Jane"}}'
+        client.model = "test-model"
+
+        name, data = await ResumeExtractor(client=client)._call_chunk(
+            "chunk_a", "prompt", 100, "resume text"
+        )
+
+        assert client.complete.await_count == 1
+        assert data["contact"]["full_name"] == "Jane"
