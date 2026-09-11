@@ -60,10 +60,15 @@ public with sharing class ResumeParserService {
     // 30s is generous now that no callout waits for a parse.
     private static final Integer TIMEOUT_MS  = 30000;
 
-    // Poll budget. Ticks 0-1 fire immediately, the rest at one-minute intervals,
-    // so a fast resume lands in seconds and a slow one still gets ~30 minutes.
-    private static final Integer MAX_TICKS       = 30;
-    private static final Integer FAST_TICKS      = 2;
+    // Poll budget. Salesforce's enqueueJob delay is whole minutes only, so the
+    // first FAST_TICKS polls chain with delay 0 (each fires a few seconds after
+    // the last) to cover a typical ~30s parse; after that it drops to one a
+    // minute. With FAST_TICKS = 2 a 30s parse was only noticed at ~T+70s,
+    // because both fast ticks burned in the first 8 seconds and the next one
+    // waited a full minute. A poll costs ~0.6s (493ms callout + 110ms enqueue)
+    // against a 120s per-transaction budget, so the extra ticks are free.
+    private static final Integer MAX_TICKS       = 35;
+    private static final Integer FAST_TICKS      = 8;
 
     private static final String  RECORD_TYPE_NAME = 'Talent';
 
