@@ -9,7 +9,7 @@ terminal state.
 from __future__ import annotations
 
 import time
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -547,3 +547,54 @@ class TestChunkRetry:
 
         assert client.complete.await_count == 1
         assert data["contact"]["full_name"] == "Jane"
+
+
+# ---------------------------------------------------------------------------
+# DeepSeek: reasoning off, and a dead contact chunk is the model's fault
+# ---------------------------------------------------------------------------
+
+class TestExtractionModelFailures:
+    """
+    DeepSeek V4 Flash spends its max_tokens on hidden reasoning and returns an
+    empty answer. That used to surface as "the resume text could not be read",
+    blaming files that parse fine on a retry.
+    """
+
+    async def test_completion_request_disables_reasoning(self):
+        from app.services.llm_client import LLMClient
+
+        response = MagicMock()
+        response.raise_for_status = MagicMock()
+        response.json.return_value = {"choices": [{"message": {"content": "{}"}}]}
+        http = MagicMock()
+        http.post = AsyncMock(return_value=response)
+
+        client = LLMClient(model="deepseek/deepseek-v4-flash")
+        with patch.object(client, "_get_or_create", return_value=http):
+            await client.complete("prompt", max_tokens=100)
+
+        payload = http.post.await_args.kwargs["json"]
+        assert payload["reasoning"] == {"enabled": False}
+
+    async def test_empty_contact_chunk_raises_a_retryable_error(self):
+        from fastapi import HTTPException
+
+        from app import worker
+        from app.services.llm import ResumeExtractor
+
+        client = AsyncMock()
+        client.model = "test-model"
+
+        async def complete(prompt, **_):
+            # chunk_a never answers; the other chunks do.
+            return "" if "full_name" in prompt else '{"skills": {}}'
+
+        client.complete.side_effect = complete
+
+        with patch("app.services.llm._CHUNK_RETRY_BACKOFF", 0), \
+             pytest.raises(HTTPException) as err:
+            await ResumeExtractor(client=client).extract("Jane Doe\njane@example.com")
+
+        assert err.value.status_code == 502
+        assert worker._is_transient(err.value)
+        assert "could not be read" not in err.value.detail

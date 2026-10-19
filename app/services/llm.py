@@ -634,6 +634,18 @@ class ResumeExtractor:
             logger.error("ResumeExtractor: overall 120-second timeout exceeded")
             raise HTTPException(status_code=504, detail="Resume parsing timed out. Try a smaller file.")
 
+        # chunk_a carries name and email. If it came back empty after every retry
+        # the model failed, not the resume — raise a 502 so the worker retries the
+        # file later, instead of the caller blaming the file ("could not be read").
+        if not dict(results).get("chunk_a"):
+            from fastapi import HTTPException
+            raise HTTPException(
+                status_code=502,
+                detail=f"The extraction model ({self._client.model}) returned no usable "
+                       f"response for the contact section after {_CHUNK_ATTEMPTS} attempts. "
+                       "The file itself is fine — retry it.",
+            )
+
         parsed: dict = {}
         for chunk_name, data in results:
             if chunk_name == "chunk_a":

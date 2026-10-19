@@ -32,6 +32,7 @@ services:
     environment: &app-env
       - OPENROUTER_API_KEY=${OPENROUTER_API_KEY}
       - OPENROUTER_MODEL=${OPENROUTER_MODEL:-deepseek/deepseek-v4-flash}
+      - OPENROUTER_REASONING_ENABLED=${OPENROUTER_REASONING_ENABLED:-false}
       - OPENROUTER_OCR_MODEL=${OPENROUTER_OCR_MODEL:-openai/gpt-4o-mini}
       - OPENROUTER_BASE_URL=${OPENROUTER_BASE_URL:-https://openrouter.ai/api/v1}
       - API_KEY=${API_KEY:-changeme}

@@ -69,6 +69,8 @@ class LLMClient:
             "messages": [{"role": "user", "content": prompt}],
             "max_tokens": max_tokens,
             "temperature": 0.0,
+            # OpenRouter's unified reasoning switch; models without reasoning ignore it.
+            "reasoning": {"enabled": settings.openrouter_reasoning_enabled},
         }
         if response_format:
             payload["response_format"] = response_format
@@ -91,7 +93,23 @@ class LLMClient:
                 detail=f"LLM service returned an error: {e.response.status_code}",
             )
 
-        content = response.json()["choices"][0]["message"].get("content")
+        body = response.json()
+        choice = body["choices"][0]
+        content = choice["message"].get("content")
+        if not content:
+            # Say *why* it was empty — "length" means the token budget ran out
+            # (usually on reasoning), anything else is a provider-side failure.
+            usage = body.get("usage") or {}
+            logger.warning(
+                "Empty completion from %s: finish_reason=%s native_finish_reason=%s "
+                "provider=%s completion_tokens=%s reasoning_tokens=%s",
+                self.model,
+                choice.get("finish_reason"),
+                choice.get("native_finish_reason"),
+                body.get("provider"),
+                usage.get("completion_tokens"),
+                (usage.get("completion_tokens_details") or {}).get("reasoning_tokens"),
+            )
         return content or ""
 
     async def complete_multimodal(self, messages: list[dict], max_tokens: int = 3000) -> str:

@@ -6,6 +6,11 @@ class Settings(BaseSettings):
     openrouter_api_key: str = ""
     # Text extraction (3 parallel chunks) — DeepSeek V4 Flash: fast MoE, 70% cheaper output
     openrouter_model: str = "deepseek/deepseek-v4-flash"
+    # DeepSeek V4 Flash is a hybrid thinking model. With reasoning on, its hidden
+    # reasoning tokens are billed against max_tokens; on a long resume they use
+    # the whole budget and the answer comes back empty (finish_reason=length).
+    # Extraction is a copy-out task that gains nothing from thinking — keep it off.
+    openrouter_reasoning_enabled: bool = False
     # OCR fallback for image-based PDFs — must stay multimodal (vision-capable)
     openrouter_ocr_model: str = "openai/gpt-4o-mini"
     openrouter_base_url: str = "https://openrouter.ai/api/v1"
